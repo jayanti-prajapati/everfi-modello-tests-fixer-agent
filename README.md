@@ -1,31 +1,194 @@
-# My Agent Project
+# Modello Tests Fixer
 
-Starter skeleton for working with Claude Code.
+An AI agent that repairs the **Modello model configuration** of an EverFi course when its generated Cypress end-to-end tests fail.
 
-## Quick start (macOS)
-```bash
-# 1. Install Claude Code
-curl -fsSL https://claude.ai/install.sh | bash
+> **Status:** the guard, parser, tools, agent loop and CLI are implemented and unit-tested (35 tests). The full loop has been exercised with stubbed Cypress/build commands, and the real build step (`ecc --script test:build`) and real Cypress runs have been exercised against a throwaway copy of `digital-banking`. A complete real-failure repair run is still being validated; see [`docs/progress.md`](docs/progress.md) for the current state and known gaps.
 
-# 2. Create the git repo (and GitHub repo if you have gh installed)
-bash setup.sh
+---
 
-# 3. Start Claude Code in this folder, then run /init to refine CLAUDE.md
-claude
+## 1. What it is
+
+EverFi courses (for example `digital-banking`, `grow`) generate their Cypress UI tests with **Modello**, driven through **ECC** (the EverFi Content Compiler). Modello builds a test for each course module from:
+
+- the compiled course content (`public/content/module-content.json`, `modules.json`), and
+- three hand-maintained configuration files in the course's `test/ui/` folder:
+
+| File | What it controls |
+|---|---|
+| `model-parameters.json` | Selectors and parameters for specific blocks, per page (e.g. which element opens a modal). |
+| `model-map.json` | Replacing a block with custom code (`"modal.js"`) or removing it from the test (`null`). |
+| `model-edges.json` | How pages and blocks are wired together for navigation. |
+
+When the course changes (a button gets a new id, a modal is restructured), a generated test can fail even though the course is fine. The fix is usually a small edit to one of those three files followed by a rebuild. That is slow, repetitive, and easy to get subtly wrong.
+
+The Modello Tests Fixer automates that loop.
+
+## 2. Purpose
+
+- Run a course's generated Cypress specs and find out *why* they fail.
+- Decide whether a failure is a **model-configuration problem** (stale selector, wrong parameter, bad replacement, wrong edge) or something that is not the agent's to fix (environment, flaky timing, a course bug, a visual diff).
+- For configuration problems, find the correct value in the course source and change **one value at a time** in the model files, rebuild through ECC, and re-run the same spec to confirm.
+- Never touch anything else: no course source, no compiled content, no generated specs, no commits.
+
+It is a developer tool for engineers who maintain course test suites. It is **not** a replacement for reviewing the resulting diff.
+
+## 3. How it works
+
+```
+CLI ──▶ preflight ──▶ agent loop (Claude Agent SDK)
+                         │
+         ┌───────────────┼───────────────────────────────┐
+         ▼               ▼                               ▼
+   run_cypress     set_model_value                 rebuild_spec
+   (one spec,      (guarded, one leaf,             (ECC: regenerate
+    JUnit report)   dry-run records only)           all specs; --write only)
+         │               ▲                               │
+         └─ failures ────┘◀── Read/Grep/Glob on the ──────┘
+                            course source (read-only)
+                         ▼
+                   report_outcome → CLI exit code
 ```
 
-## What's inside
+1. **Preflight** checks that `ecc`, `yq` and `modello` are on `PATH` and that the course has `.github/workflows/build-and-test.yml` (or `test/ui/regression-tests.sh`) so ECC knows what to build. It fails early, before any model spend.
+2. **Run.** The agent calls `run_cypress` for a spec. This runs `modello run -- cypress run --spec <absolute path> --reporter junit ...` (the same call ECC's own `test:headless` makes underneath, but for one spec and with a machine-readable report). Failures come back as structured data.
+3. **Diagnose.** For each failure the agent decides if it is a configuration problem. Typical case: `Expected to find element: \`#btn2-stale\`, but never found it`. It then searches the course source (the `content.yml` / locale files) and the model files for the correct value. It changes a value only when exactly one candidate is clearly right; otherwise it stops and reports what a human must decide.
+4. **Fix.** `set_model_value` changes a single leaf in one of the three model files (identified by a key path). In **dry-run** (default) the change is only *recorded and reported*. With `--write` it is applied, preserving the file's indentation and trailing newline.
+5. **Rebuild and verify** (`--write` only). `rebuild_spec` runs `ecc --script test:build`, which regenerates every spec; the agent then re-runs the same spec. It repeats until the spec passes or the run limit is reached.
+6. **Report.** The agent ends with `report_outcome` (`fixed`, `proposed` or `unfixable`) plus a factual summary of what failed, what changed (`file`, key path, old → new) and the result. The CLI prints this and sets the exit code.
+
+### Safety is enforced in code, not only in the prompt
+
+- **Write allowlist (`src/guard.ts`).** Only `model-parameters.json`, `model-map.json` and `model-edges.json` inside the model directory can be written. Path traversal and symlinks that point outside are rejected.
+- **Leaf-only patches.** A patch sets one scalar value. It cannot replace a subtree, delete anything, descend through a scalar, or use keys like `__proto__`.
+- **No shell, no editing tools.** The agent has no Bash/Edit/Write. Its only side effects are the five tools above. A permission gate (`canUseTool`) also confines Read/Grep/Glob to the project directory and blocks `.env*` files.
+- **The model never supplies command text.** It passes a spec *file name* (validated) to a run template, and the run/build commands themselves come from the operator (`--run-cmd`, `--build-cmd`).
+- **Bounded.** A maximum number of Cypress runs (`--max-attempts`) and a spend cap (`--max-budget-usd`).
+- **Dry-run by default.** Nothing is written unless you pass `--write`. The tool never commits.
+
+## 4. Prerequisites
+
+- Node 20+ and npm.
+- Claude credentials. The Agent SDK uses your existing Claude Code login, or `ANTHROPIC_API_KEY` if set. Runs cost money (a small dry-run costs roughly $0.10; see `--max-budget-usd`).
+- `ecc`, `yq` (`brew install yq`) and `modello` on your `PATH`, and a course that builds tests with them. See the `ecc-course-dev` skill for ECC/Furnace setup.
+- The target course must already have compiled content (`public/content/module-content.json` and `modules.json`) and its dependencies available, because the test build reads them. Cypress needs its binary cache and a browser (Electron is used by default).
+- Network access to wherever the course is served. For the `s3` environment, tests run against the **deployed** course on S3 (its `baseUrl` is in `test/ui/modello.config.json`), not against your local `app/`.
+
+## 5. Install
+
+```bash
+git clone <this repo> && cd my-agent
+npm install
+npm test            # 35 unit tests
+npm run typecheck
+```
+
+## 6. Usage
+
+> ⚠️ **Use a throwaway copy of the course for anything with `--write`.** `ecc --script test:build` first **deletes `test/ui/cypress/e2e`** and then regenerates every spec, and the fixer edits files in the course's `test/ui/`. Do not point it at a checkout you care about until you have reviewed the behavior.
+
+```bash
+# Dry-run (default): find failures, propose a fix, change nothing.
+npm run dev -- --project /path/to/course --spec digital-banking-m3-s3-s3.amazonaws.com.js
+
+# Apply the fix, rebuild with ECC, and re-run the spec to confirm.
+npm run dev -- --project /path/to/course --spec digital-banking-m3-s3-s3.amazonaws.com.js --write
+
+# Check every generated spec (slow: each module can take several minutes).
+npm run dev -- --project /path/to/course
+
+# Build against a local course server (`ecc start` running) instead of S3.
+npm run dev -- --project /path/to/course --write --local
+```
+
+After a run, review the change in the course repo with `git diff test/ui/` and decide for yourself whether to keep it.
+
+### Options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--project <dir>` | (required) | Course root (where `modello` is normally run from). |
+| `--spec <file>` | all specs | A generated spec file name in `test/ui/cypress/e2e`. Repeatable. |
+| `--write` | off | Apply changes. Without it, changes are only proposed. |
+| `--local` | off | Build with `ecc --script test:local` (course server must be running). |
+| `--model-dir <dir>` | `test/ui` | Folder with the `model-*.json` files, relative to the project. |
+| `--max-attempts <n>` | `3` | Maximum Cypress runs. |
+| `--max-budget-usd <n>` | `5` | Spend cap for the agent. |
+| `--model <id>` | `claude-sonnet-5-5` | Claude model to use. |
+| `--run-cmd <template>` | `modello run -- cypress run --spec {spec} --reporter junit --reporter-options mochaFile={report},toConsole=false` | How to run one spec. `{spec}` is an **absolute** path. |
+| `--build-cmd <template>` | `ecc --script test:build` | How to regenerate specs. |
+
+Why `{spec}` is absolute: `modello run` starts Cypress from modello's own install directory, so a project-relative path would resolve there and match nothing.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | `fixed` (spec passes after the change) or `proposed` (dry-run recorded a change). |
+| `2` | `unfixable`: ambiguous, not a model-config problem, or the run limit was hit. |
+| `3` | The agent finished without reporting an outcome. |
+| `1` | Usage error or preflight failure. |
+
+### Example output
+
+```
+→ mcp__fixer__run_cypress
+→ Grep
+→ mcp__fixer__set_model_value
+→ mcp__fixer__rebuild_spec
+→ mcp__fixer__run_cypress
+
+--- Result ---
+fixed: The spec failed on page m1/a1/page-2: cy.button("#btn2-stale") timed out ...
+applied: model-parameters.json ["&common","m1/a1/page-2","select_block_by_type(\"button\";2)","selector"] "#btn2-stale" -> "#btn2"
+cost: $0.13
+```
+
+## 7. Known limitations
+
+- **No page/block context from Cypress.** The failure stack from a real run only contains frames from modello's support code (for example `support/course/legacy-sdk/blocks/modal.js:11`), not the generated spec. The code can map a spec line to its `// -> page: ..., block uid:` comment, but real failures rarely include that line. In practice the agent works from the failing **selector in the error message**, which it searches for in the model files and course source. Failures with no selector in the message are harder.
+- **Flaky specs.** Real specs can fail intermittently (for example the intro modal waiting for its close button). The same unmodified spec has failed and then passed on a later run. Confirm a failure reproduces before trusting a fix.
+- **Slow.** A single real module run takes from about one to six minutes, and each fix triggers a full ECC rebuild of every module.
+- **ECC rebuild is all-or-nothing.** `ecc --script test:build` deletes and regenerates all specs and reads the `call-build-and-test-course` job from `build-and-test.yml`. Courses that use a different workflow file or job need `test/ui/regression-tests.sh` or a `--build-cmd` override.
+- **JSON reformatting.** Writes re-serialize the whole file using its original indent. A file with hand-compacted lines will be reformatted.
+- **Scope of repairs.** Selector fixes in `model-parameters.json` are the primary case. `model-map.json` and `model-edges.json` repairs are possible through the same tool but less exercised.
+
+## 8. Project layout
+
 | Path | Purpose |
 |---|---|
-| `CLAUDE.md` | Persistent project memory (keep under ~200 lines) |
-| `CLAUDE.local.md` | Your personal overrides (gitignored) |
-| `docs/` | Longer docs, pulled in with `@docs/file.md` |
-| `.claude/settings.json` | Permissions (shared with team) |
-| `.claude/skills/` | Skills: `code-review`, `wrap-up` |
-| `.claude/agents/` | Subagents: `reviewer`, `researcher` |
+| `src/cli.ts` | Argument parsing, preflight, result printing, exit codes. |
+| `src/agent.ts` | Agent loop over the Claude Agent SDK and the permission gate (`canUseTool`). |
+| `src/tools/index.ts` | The five tools exposed to the agent (`list_specs`, `run_cypress`, `set_model_value`, `rebuild_spec`, `report_outcome`). |
+| `src/session.ts` | All side effects (run, patch, rebuild) and run state. |
+| `src/guard.ts` | Write allowlist, leaf-only patching, format-preserving serialization. |
+| `src/failures.ts` | JUnit parsing and stack-line → spec block mapping. |
+| `src/preflight.ts` | Tool/workflow checks before any run. |
+| `src/config.ts`, `src/shell.ts` | Defaults and command-template execution. |
+| `src/prompt.ts` | The agent's system prompt. |
+| `test/` | Vitest unit tests (guard, parser, session, permission gate, preflight). |
+| `docs/` | `architecture.md` (design), `progress.md` (status and next steps). |
 
-## Next steps
-1. Edit the TODOs in `CLAUDE.md`.
-2. Fill in `docs/architecture.md`.
-3. Optional: add MCP servers (e.g. a docs server, GitHub) with `claude mcp add`.
-4. Optional: add Anthropic's skills: `/plugin marketplace add anthropics/skills`.
+## 9. Development
+
+```bash
+npm test                                   # all tests
+npx vitest run test/guard.test.ts          # one file (add -t "<name>" for one case)
+npm run typecheck
+npm run dev -- --help
+```
+
+Unit tests use fake run/build commands. **They cannot catch real-run bugs** (for example the absolute `--spec` path requirement was only found by running against a real course), so verify run/build changes against a throwaway course copy.
+
+## 10. Working in this repo with Claude Code
+
+This project is built and maintained with Claude Code.
+
+- `CLAUDE.md`: project guidance and rules for Claude Code sessions (plan before multi-file changes, don't add dependencies without asking, never commit secrets).
+- `.claude/skills/`:
+  - `ecc-course-dev`: ECC and Furnace setup, building and serving courses.
+  - `modello-tests`: generating, running and debugging Modello tests, and using this fixer.
+  - `code-review`, `wrap-up`: review the current diff; end-of-session progress notes.
+- `.claude/agents/`: `reviewer` and `researcher` subagents.
+- `.claude/settings.json`: shared permissions (read-only git and `ls` allowed; `.env*` reads and `rm -rf` denied).
+- `setup.sh`: one-time bootstrap (git init, initial commit, optional private GitHub repo via `gh`). Don't rerun it casually.
+- `CLAUDE.local.md` (gitignored) is for personal overrides.
