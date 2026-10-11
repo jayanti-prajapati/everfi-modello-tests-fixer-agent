@@ -64,10 +64,10 @@ export class Session {
     return { ...patch, before: result.before, created: result.created, applied };
   }
 
-  async rebuild(scope: string) {
-    if (!SAFE_NAME.test(scope)) throw new GuardError(`invalid scope "${scope}"`);
+  /** Regenerates all specs (ECC rebuilds every test the course defines; there is no per-scope build). */
+  async rebuild() {
     if (!this.config.write) throw new GuardError('rebuild is disabled in dry-run mode');
-    const res = await runShell(fill(this.config.buildCommand, { scope }), this.config.projectDir);
-    return { exitCode: res.code, outputTail: res.output };
+    const res = await runShell(this.config.buildCommand, this.config.projectDir);
+    return { exitCode: res.code, outputTail: res.output, specsAfterBuild: this.listSpecs() };
   }
 }

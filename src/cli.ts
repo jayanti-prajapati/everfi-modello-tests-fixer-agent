@@ -3,6 +3,7 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { runFixer } from './agent.js';
 import { DEFAULTS, type Config } from './config.js';
+import { preflight } from './preflight.js';
 
 const HELP = `modello-fixer --project <course-root> [--spec <file>]... [--write] [options]
 
@@ -14,7 +15,8 @@ const HELP = `modello-fixer --project <course-root> [--spec <file>]... [--write]
   --max-budget-usd <n>   Spend cap for the agent (default ${DEFAULTS.maxBudgetUsd})
   --model <id>           Claude model (default ${DEFAULTS.model})
   --run-cmd <template>   Placeholders {spec} {report}
-  --build-cmd <template> Placeholder {scope}
+  --local                Build against a local course server (needs ecc start running): ecc --script test:local
+  --build-cmd <template> Override the build command (default ecc --script test:build)
 
 Exit codes: 0 fixed/proposed, 2 unfixable, 3 no outcome reported, 1 usage error`;
 
@@ -29,6 +31,7 @@ const { values } = parseArgs({
     model: { type: 'string' },
     'run-cmd': { type: 'string' },
     'build-cmd': { type: 'string' },
+    local: { type: 'boolean', default: false },
     help: { type: 'boolean', short: 'h' },
   },
 });
@@ -43,12 +46,19 @@ const config: Config = {
   projectDir: path.resolve(values.project),
   modelDir: values['model-dir'] ?? DEFAULTS.modelDir,
   write: values.write ?? false,
+  local: values.local ?? false,
   maxAttempts: num(values['max-attempts'], DEFAULTS.maxAttempts),
   maxBudgetUsd: num(values['max-budget-usd'], DEFAULTS.maxBudgetUsd),
   model: values.model ?? DEFAULTS.model,
   runCommand: values['run-cmd'] ?? DEFAULTS.runCommand,
-  buildCommand: values['build-cmd'] ?? DEFAULTS.buildCommand,
+  buildCommand: values['build-cmd'] ?? (values.local ? DEFAULTS.localBuildCommand : DEFAULTS.buildCommand),
 };
+
+const problems = preflight(config);
+if (problems.length) {
+  console.error(`Preflight failed:\n- ${problems.join('\n- ')}`);
+  process.exit(1);
+}
 
 const { session, costUsd } = await runFixer(config, values.spec ?? []);
 const { outcome, proposals } = session;

@@ -47,9 +47,9 @@ export function createFixerServer(s: Session) {
       ),
       tool(
         'rebuild_spec',
-        'Regenerate the specs for a course scope (e.g. "m1") after a model config change. Only available with --write.',
-        { scope: z.string().describe('Build scope, e.g. m1') },
-        guarded(({ scope }) => s.rebuild(scope)),
+        'Regenerate ALL course specs through ECC after a model config change (slow; it deletes and recreates cypress/e2e). Returns the spec files present afterwards. Only available with --write.',
+        {},
+        guarded(() => s.rebuild()),
       ),
       tool(
         'report_outcome',

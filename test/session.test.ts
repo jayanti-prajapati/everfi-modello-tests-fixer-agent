@@ -23,6 +23,7 @@ const cfg = (over: Partial<Config> = {}): Config => ({
   ...DEFAULTS,
   projectDir: dir,
   write: false,
+  local: false,
   runCommand: FAKE_RUN,
   ...over,
 });
@@ -82,16 +83,18 @@ describe('Session.setValue', () => {
 
 describe('Session.rebuild', () => {
   it('is refused in dry-run', async () => {
-    await expect(new Session(cfg()).rebuild('m1')).rejects.toThrow(/dry-run/);
+    await expect(new Session(cfg()).rebuild()).rejects.toThrow(/dry-run/);
   });
 
-  it('rejects unsafe scopes', async () => {
-    await expect(new Session(cfg({ write: true })).rebuild('m1; rm -rf /')).rejects.toThrow(GuardError);
-  });
-
-  it('runs the build template with a safe scope', async () => {
-    const r = await new Session(cfg({ write: true, buildCommand: 'echo built-{scope}' })).rebuild('m1');
+  it('runs the build command and lists specs afterwards', async () => {
+    const r = await new Session(cfg({ write: true, buildCommand: 'echo built' })).rebuild();
     expect(r.exitCode).toBe(0);
-    expect(r.outputTail).toContain('built-m1');
+    expect(r.outputTail).toContain('built');
+    expect(r.specsAfterBuild).toEqual(['spec.js']);
+  });
+
+  it('defaults to the ECC build', () => {
+    expect(DEFAULTS.buildCommand).toBe('ecc --script test:build');
+    expect(DEFAULTS.localBuildCommand).toBe('ecc --script test:local');
   });
 });

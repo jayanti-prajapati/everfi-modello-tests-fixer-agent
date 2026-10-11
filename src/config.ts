@@ -6,10 +6,12 @@ export interface Config {
   /** Directory holding model-*.json, relative to projectDir */
   modelDir: string;
   write: boolean;
+  /** Build against a local course server (`ecc start` running): uses ecc's test:local script */
+  local: boolean;
   maxAttempts: number;
   model: string;
   maxBudgetUsd: number;
-  /** Operator-supplied shell templates. Placeholders: {spec} {report} {scope} */
+  /** Operator-supplied shell templates. Placeholders: {spec} {report} (run only) */
   runCommand: string;
   buildCommand: string;
 }
@@ -21,7 +23,9 @@ export const DEFAULTS = {
   maxBudgetUsd: 5,
   runCommand:
     'modello run -- cypress run --spec {spec} --reporter junit --reporter-options mochaFile={report},toConsole=false',
-  buildCommand: 'modello build --scope {scope} --platform s3 --environment s3.amazonaws.com',
+  /** ECC regenerates every test defined in .github/workflows/build-and-test.yml (deletes test/ui/cypress/e2e first) */
+  buildCommand: 'ecc --script test:build',
+  localBuildCommand: 'ecc --script test:local',
 } as const;
 
 export const absModelDir = (c: Config) => path.resolve(c.projectDir, c.modelDir);

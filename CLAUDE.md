@@ -15,6 +15,7 @@ Node 20+, TypeScript, Claude Agent SDK.
 - Test (all): `npm test`
 - Test (single): `npx vitest run test/guard.test.ts` (add `-t "<name>"` for one case)
 - Typecheck: `npm run typecheck`
+- Build/run of the target course goes through ECC (`ecc --script test:build`; `--local` uses `test:local`) and `modello run` (per spec, JUnit). Needs `ecc`, `yq`, `modello` on PATH; preflight checks this. Override with `--build-cmd` / `--run-cmd`.
 
 ## Repo notes
 - `setup.sh` is one-time bootstrap (git init, initial commit, optional private GitHub repo via `gh`). Don't rerun it casually.

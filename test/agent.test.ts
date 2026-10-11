@@ -28,7 +28,7 @@ describe('canUseTool', () => {
 
 describe('createFixerServer', () => {
   it('builds an in-process MCP server', () => {
-    const server = createFixerServer(new Session({ ...DEFAULTS, projectDir: '/proj', write: false }));
+    const server = createFixerServer(new Session({ ...DEFAULTS, projectDir: '/proj', write: false, local: false }));
     expect(server.type).toBe('sdk');
     expect(server.name).toBe('fixer');
   });
