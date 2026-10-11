@@ -51,6 +51,15 @@ describe('Session.runSpec', () => {
     await expect(s.runSpec('spec.js')).rejects.toThrow(/attempt limit/);
   });
 
+  it('passes {spec} as an absolute path', async () => {
+    const out = path.join(dir, 'spec-arg.txt');
+    const s = new Session(cfg({ runCommand: `node -e "require('fs').writeFileSync('${out}', process.argv[1])" {spec} {report}` }));
+    await s.runSpec('spec.js');
+    const arg = fs.readFileSync(out, 'utf8');
+    expect(path.isAbsolute(arg)).toBe(true);
+    expect(arg.endsWith(path.join('test/ui/cypress/e2e/spec.js'))).toBe(true);
+  });
+
   it('rejects traversal and missing specs', async () => {
     const s = new Session(cfg());
     await expect(s.runSpec('../x.js')).rejects.toThrow(GuardError);

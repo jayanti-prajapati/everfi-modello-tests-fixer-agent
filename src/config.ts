@@ -11,7 +11,7 @@ export interface Config {
   maxAttempts: number;
   model: string;
   maxBudgetUsd: number;
-  /** Operator-supplied shell templates. Placeholders: {spec} {report} (run only) */
+  /** Operator-supplied shell templates. Placeholders: {spec} (absolute path) {report} (run only) */
   runCommand: string;
   buildCommand: string;
 }

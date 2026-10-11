@@ -42,10 +42,9 @@ export class Session {
     const specPath = this.specPath(spec);
     this.runs++;
     const report = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fixer-report-')), 'junit.xml');
-    const cmd = fill(this.config.runCommand, {
-      spec: path.relative(this.config.projectDir, specPath),
-      report,
-    });
+    // Absolute on purpose: `modello run` launches Cypress from modello's own install dir,
+    // so a project-relative --spec would resolve there and match nothing.
+    const cmd = fill(this.config.runCommand, { spec: path.resolve(specPath), report });
     const res = await runShell(cmd, this.config.projectDir);
     if (!fs.existsSync(report)) {
       return { status: 'no_report', exitCode: res.code, timedOut: res.timedOut, outputTail: res.output };
