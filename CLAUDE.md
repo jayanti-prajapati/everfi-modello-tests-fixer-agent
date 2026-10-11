@@ -21,7 +21,9 @@ Node 20+, TypeScript, Claude Agent SDK.
 - `setup.sh` is one-time bootstrap (git init, initial commit, optional private GitHub repo via `gh`). Don't rerun it casually.
 - `.claude/settings.json` allows read-only git commands and `ls`, and denies reading `.env*` and `rm -rf`.
 - Personal overrides go in `CLAUDE.local.md` (gitignored). Keep this file under ~200 lines; put longer material in `docs/` and pull it in with `@docs/file.md`.
-- `.claude/skills/` holds `code-review` and `wrap-up`; `.claude/agents/` holds `reviewer` and `researcher`.
+- `.claude/skills/` holds `code-review`, `wrap-up`, `ecc-course-dev` (ECC/Furnace setup and course builds) and `modello-tests` (generate/run/fix course Cypress tests); `.claude/agents/` holds `reviewer` and `researcher`.
+- Never run `ecc --script test:build` or the fixer with `--write` on a real course checkout: it deletes and regenerates `test/ui/cypress/e2e`. Use a throwaway copy.
+- Stubbed tests hide real-run bugs (e.g. `modello run` needs an absolute `--spec`); verify run/build changes against a real course copy.
 
 ## Rules
 - Plan first for any change touching more than 2 files; wait for approval. Exempt: `/init` and `/wrap-up`, which update docs and may touch several files.
