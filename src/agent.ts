@@ -8,19 +8,24 @@ import { createFixerServer, SERVER_NAME, TOOL_NAMES } from './tools/index.js';
 const READ_ONLY = new Set(['Read', 'Grep', 'Glob']);
 
 /** Permission gate: only our tools plus read-only built-ins, and never outside the project or into .env files. */
-export function makeCanUseTool(projectDir: string): CanUseTool {
+export function makeCanUseTool(projectDir: string, onDeny: (msg: string) => void = () => {}): CanUseTool {
   const root = path.resolve(projectDir);
+  const deny = (toolName: string, input: Record<string, unknown>, message: string) => {
+    onDeny(`denied ${toolName} ${JSON.stringify(input)}: ${message}`);
+    return { behavior: 'deny' as const, message };
+  };
   return async (toolName, input) => {
-    if (toolName.startsWith(`mcp__${SERVER_NAME}__`)) return { behavior: 'allow', updatedInput: input };
+    // ToolSearch only loads tool schemas; the agent uses it to discover our MCP tools.
+    if (toolName === 'ToolSearch' || toolName.startsWith(`mcp__${SERVER_NAME}__`)) return { behavior: 'allow', updatedInput: input };
     if (READ_ONLY.has(toolName)) {
       const target = String(input.file_path ?? input.path ?? root);
       const abs = path.resolve(root, target);
       const inside = abs === root || abs.startsWith(root + path.sep);
-      if (!inside) return { behavior: 'deny', message: 'Reads are limited to the project directory.' };
-      if (path.basename(abs).startsWith('.env')) return { behavior: 'deny', message: '.env files are off limits.' };
+      if (!inside) return deny(toolName, input, 'Reads are limited to the project directory.');
+      if (path.basename(abs).startsWith('.env')) return deny(toolName, input, '.env files are off limits.');
       return { behavior: 'allow', updatedInput: input };
     }
-    return { behavior: 'deny', message: `${toolName} is not available to this agent.` };
+    return deny(toolName, input, `${toolName} is not available to this agent.`);
   };
 }
 
@@ -45,10 +50,12 @@ export async function runFixer(config: Config, specs: string[], log: (s: string)
       cwd: config.projectDir,
       systemPrompt: SYSTEM_PROMPT,
       mcpServers: { [SERVER_NAME]: createFixerServer(session) },
-      allowedTools: [...TOOL_NAMES, ...READ_ONLY],
+      // Read/Grep/Glob are deliberately NOT listed here: bare allowedTools entries bypass canUseTool,
+      // and that gate is what confines reads to the project and blocks .env files.
+      allowedTools: [...TOOL_NAMES],
       disallowedTools: ['Bash', 'Write', 'Edit', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task'],
       permissionMode: 'default',
-      canUseTool: makeCanUseTool(config.projectDir),
+      canUseTool: makeCanUseTool(config.projectDir, log),
       settingSources: [],
       maxBudgetUsd: config.maxBudgetUsd,
     },

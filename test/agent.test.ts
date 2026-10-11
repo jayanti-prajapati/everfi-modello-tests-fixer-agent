@@ -12,6 +12,7 @@ describe('canUseTool', () => {
     expect((await call('mcp__fixer__run_cypress'))?.behavior).toBe('allow');
     expect((await call('Read', { file_path: '/proj/test/ui/model-map.json' }))?.behavior).toBe('allow');
     expect((await call('Grep', { path: '/proj/public' }))?.behavior).toBe('allow');
+    expect((await call('ToolSearch'))?.behavior).toBe('allow');
   });
 
   it('denies writes, shell, and anything else', async () => {
