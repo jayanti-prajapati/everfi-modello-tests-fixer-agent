@@ -16,8 +16,22 @@ describe('applyPatch', () => {
     expect((doc as any)['&common']['m1/a1/page-2']['select_block_by_type("button";2)'].selector).toBe('#btn2');
   });
 
-  it('creates missing intermediate objects', () => {
-    const r = applyPatch({}, { file: 'model-parameters.json', path: ['a', 'b'], value: 1 });
+  it('refuses to create missing keys by default', () => {
+    expect(() => applyPatch(doc, { file: 'model-parameters.json', path: ['m1/a1/page-2', 'x', 'selector'], value: 'y' })).toThrow(/does not exist/);
+    expect(() => applyPatch(doc, { file: 'model-parameters.json', path: [...KEY.slice(0, 3), 'newLeaf'], value: 'y' })).toThrow(/does not exist/);
+  });
+
+  it('points at the parent key the caller left out', () => {
+    // the real mistake: omitting "&common"
+    expect(() => applyPatch(doc, { file: 'model-parameters.json', path: KEY.slice(1), value: 'y' })).toThrow(/exists under "&common"/);
+  });
+
+  it('lists existing keys in the error', () => {
+    expect(() => applyPatch(doc, { file: 'model-parameters.json', path: ['nope', 'x'], value: 'y' })).toThrow(/Existing keys here: "&common"/);
+  });
+
+  it('creates missing keys only with create: true', () => {
+    const r = applyPatch({}, { file: 'model-parameters.json', path: ['a', 'b'], value: 1, create: true });
     expect(r.json).toEqual({ a: { b: 1 } });
     expect(r.created).toBe(true);
   });

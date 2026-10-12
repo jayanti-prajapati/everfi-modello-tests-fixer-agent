@@ -12,6 +12,8 @@ export interface Patch {
   /** Key path to a leaf, e.g. ["&common", "m1/a1/page-2", "select_block_by_type(\"button\";0)", "selector"] */
   path: string[];
   value: string | number | boolean;
+  /** Explicitly allow creating keys that do not exist yet. Repairs edit existing entries, so this is off by default. */
+  create?: boolean;
 }
 
 export interface PatchResult {
@@ -64,8 +66,11 @@ export function applyPatch(doc: unknown, patch: Patch): PatchResult {
   if (!isObject(root)) throw new GuardError('model file root must be a JSON object');
 
   let node: Record<string, unknown> = root;
+  const walked: string[] = [];
   for (const key of patch.path.slice(0, -1)) {
     const next = node[key];
+    if (next === undefined && !patch.create) throw new GuardError(notFound(node, key, walked));
+    walked.push(key);
     if (next === undefined) {
       const created: Record<string, unknown> = {};
       node[key] = created;
@@ -79,11 +84,27 @@ export function applyPatch(doc: unknown, patch: Patch): PatchResult {
 
   const leaf = patch.path[patch.path.length - 1];
   const before = node[leaf];
+  if (before === undefined && !patch.create) throw new GuardError(notFound(node, leaf, walked));
   if (isObject(before) || Array.isArray(before)) {
     throw new GuardError(`"${leaf}" holds a subtree; only leaf values may be set`);
   }
   node[leaf] = patch.value;
   return { json: root, before, after: patch.value, created: before === undefined };
+}
+
+/** Explains a missing key and points at where it does exist, so the caller can correct the path. */
+function notFound(node: Record<string, unknown>, key: string, walked: string[]): string {
+  const where = walked.length ? walked.map((k) => `"${k}"`).join(' -> ') : 'the file root';
+  const elsewhere = Object.entries(node)
+    .filter(([, v]) => isObject(v) && key in v)
+    .map(([k]) => `"${k}"`);
+  const keys = Object.keys(node);
+  return (
+    `"${key}" does not exist under ${where}; nothing was written. ` +
+    (elsewhere.length ? `It exists under ${elsewhere.join(', ')} - did you leave out a parent key? ` : '') +
+    `Existing keys here: ${keys.slice(0, 25).map((k) => `"${k}"`).join(', ')}${keys.length > 25 ? ', ...' : ''}. ` +
+    'Set create: true only to add a genuinely new entry.'
+  );
 }
 
 /** Serializes JSON matching the original file's indentation and trailing newline. */

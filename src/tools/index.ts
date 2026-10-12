@@ -37,11 +37,12 @@ export function createFixerServer(s: Session) {
       ),
       tool(
         'set_model_value',
-        'Set ONE leaf value in a model config file. path is the list of JSON keys from the file root to the leaf (keys may contain spaces, quotes, slashes). Never replaces subtrees. In dry-run mode this only records the proposal.',
+        'Set ONE leaf value in a model config file. path is the list of JSON keys from the file root to the leaf (keys may contain spaces, quotes, slashes), e.g. ["&common", "<page>", "<block key>", "selector"]. Edits an EXISTING entry: a path that does not exist is rejected with a hint, so find the exact existing key path first (Grep/Read). Set create: true only to add a genuinely new entry. Never replaces subtrees. In dry-run mode this only records the proposal.',
         {
           file: z.enum(WRITABLE_FILES),
           path: z.array(z.string()).min(1),
           value: z.union([z.string(), z.number(), z.boolean()]),
+          create: z.boolean().optional(),
         },
         guarded((p) => s.setValue(p)),
       ),
