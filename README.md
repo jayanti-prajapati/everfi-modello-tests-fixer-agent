@@ -4,6 +4,8 @@ An AI agent that repairs the **Modello model configuration** of an EverFi course
 
 > **Status:** the guard, parser, tools, agent loop and CLI are implemented and unit-tested (38 tests). The full loop has been exercised with stubbed commands, and end to end against a throwaway copy of `digital-banking` with the real ECC build and real Cypress: a deliberately broken m3 selector was found and fixed and the spec passed on rerun. It has only been proven on that one kind of failure; see [`docs/progress.md`](docs/progress.md) for details and known gaps.
 
+Short version: [`docs/agent-guide.md`](docs/agent-guide.md) covers what's in the agent and how to use it.
+
 ---
 
 ## 1. What it is

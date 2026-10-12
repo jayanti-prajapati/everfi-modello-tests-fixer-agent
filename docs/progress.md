@@ -15,7 +15,7 @@ Smoke test done (2026-10-11) on a scratch copy of digital-banking `app/` + `test
 - [ ] Add model-map and model-edges repair guidance/tests (selector repair in model-parameters comes first).
 - [ ] Optional `--set-selector` override for cases the agent can't infer.
 - [ ] Decide how to preserve hand-formatted JSON on write.
-- [ ] Commit this repo's pending changes (guard/prompt/tools/tests, README, skills incl. `course-pr`, CLAUDE.md, progress).
+- [ ] Push this repo's 3 local commits when ready (`212411a`, `ce6b802`, `12e7da8` on `main`; nothing pushed).
 
 ## 2026-10-11 session
 **Done**
@@ -43,6 +43,7 @@ Smoke test done (2026-10-11) on a scratch copy of digital-banking `app/` + `test
 - Diagnosed from screenshots, modello's `assessment.js` and a DOM dump: (1) `m1/a2/page-4` inputs have `name` set to translation-edit markup (`<span data-forgeaction='editlocale' ...>formField1</span>`) so `[name='formField1']` never matched, deterministic; (2) modello's one-at-a-time assessment clicks random answers and on a failed attempt does go back/forward, landing on the page-5 intro, so it flaked.
 - Config fix: `model-parameters.json` `[name='formFieldN']` -> `[name*='formFieldN']` (m1/a2/page-4, m2/a4/page-4); `model-map.json` s3 section maps `m1/a1/page-6` assessment to `prod-assesment-5.js`. After `ecc --script test:build`, m1 passed from the regenerated spec (4m31s, one run). A hand-patched spec with the same fixes also passed (4m33s).
 - Added skill `course-pr` (branch, commit, push, PR with detailed description, confirm before push); branch `modello-m1-config-fixes` committed (`4e7085fd`) and pushed.
+- Committed this repo's pending work: `ce6b802` (set_model_value rejects non-existent keys unless `create: true`; 38 tests, typecheck clean) and `12e7da8` (real-checkout docs, `course-pr` skill, progress).
 
 **In progress**
 - PR not created: `gh pr create` and `gh pr list` both return the SAML enforcement error for `EVERFI-Content` (checked again at wrap-up). The pushed branch is fine.
