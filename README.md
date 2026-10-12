@@ -2,7 +2,7 @@
 
 An AI agent that repairs the **Modello model configuration** of an EverFi course when its generated Cypress end-to-end tests fail.
 
-> **Status:** the guard, parser, tools, agent loop and CLI are implemented and unit-tested (35 tests). The full loop has been exercised with stubbed Cypress/build commands, and the real build step (`ecc --script test:build`) and real Cypress runs have been exercised against a throwaway copy of `digital-banking`. A complete real-failure repair run is still being validated; see [`docs/progress.md`](docs/progress.md) for the current state and known gaps.
+> **Status:** the guard, parser, tools, agent loop and CLI are implemented and unit-tested (38 tests). The full loop has been exercised with stubbed commands, and end to end against a throwaway copy of `digital-banking` with the real ECC build and real Cypress: a deliberately broken m3 selector was found and fixed and the spec passed on rerun. It has only been proven on that one kind of failure; see [`docs/progress.md`](docs/progress.md) for details and known gaps.
 
 ---
 
@@ -59,7 +59,7 @@ CLI ──▶ preflight ──▶ agent loop (Claude Agent SDK)
 ### Safety is enforced in code, not only in the prompt
 
 - **Write allowlist (`src/guard.ts`).** Only `model-parameters.json`, `model-map.json` and `model-edges.json` inside the model directory can be written. Path traversal and symlinks that point outside are rejected.
-- **Leaf-only patches.** A patch sets one scalar value. It cannot replace a subtree, delete anything, descend through a scalar, or use keys like `__proto__`.
+- **Leaf-only, existing-entries-only patches.** A patch sets one scalar value. It cannot replace a subtree, delete anything, descend through a scalar, or use keys like `__proto__`. It also cannot create keys that do not exist (unless `create: true` is set explicitly): a wrong path is rejected with a hint listing the existing keys and where the key actually lives. This was added after a real run in which the agent left out the `&common` section and silently created a stray root-level key.
 - **No shell, no editing tools.** The agent has no Bash/Edit/Write. Its only side effects are the five tools above. A permission gate (`canUseTool`) also confines Read/Grep/Glob to the project directory and blocks `.env*` files.
 - **The model never supplies command text.** It passes a spec *file name* (validated) to a run template, and the run/build commands themselves come from the operator (`--run-cmd`, `--build-cmd`).
 - **Bounded.** A maximum number of Cypress runs (`--max-attempts`) and a spend cap (`--max-budget-usd`).
@@ -78,13 +78,13 @@ CLI ──▶ preflight ──▶ agent loop (Claude Agent SDK)
 ```bash
 git clone <this repo> && cd my-agent
 npm install
-npm test            # 35 unit tests
+npm test            # 38 unit tests
 npm run typecheck
 ```
 
 ## 6. Usage
 
-> ⚠️ **Use a throwaway copy of the course for anything with `--write`.** `ecc --script test:build` first **deletes `test/ui/cypress/e2e`** and then regenerates every spec, and the fixer edits files in the course's `test/ui/`. Do not point it at a checkout you care about until you have reviewed the behavior.
+> ⚠️ **`--write` edits the course checkout.** `ecc --script test:build` first **deletes `test/ui/cypress/e2e`** (gitignored, regenerated) and the fixer edits the `test/ui/model-*.json` files. It never commits; review with `git diff` in the course and keep or discard the changes yourself.
 
 ```bash
 # Dry-run (default): find failures, propose a fix, change nothing.
@@ -146,6 +146,7 @@ cost: $0.13
 ## 7. Known limitations
 
 - **No page/block context from Cypress.** The failure stack from a real run only contains frames from modello's support code (for example `support/course/legacy-sdk/blocks/modal.js:11`), not the generated spec. The code can map a spec line to its `// -> page: ..., block uid:` comment, but real failures rarely include that line. In practice the agent works from the failing **selector in the error message**, which it searches for in the model files and course source. Failures with no selector in the message are harder.
+- **Stale compiled content.** Modello generates from `public/content/*.json`, which is git-ignored and can be older than the deployed course (tests run against the deployed S3 course). Rebuild the course (`ecc build`) or compare with the deployed `module-content.json` before blaming a config problem. In our check the generated specs were identical either way, but that is not guaranteed.
 - **Flaky specs.** Real specs can fail intermittently (for example the intro modal waiting for its close button). The same unmodified spec has failed and then passed on a later run. Confirm a failure reproduces before trusting a fix.
 - **Slow.** A single real module run takes from about one to six minutes, and each fix triggers a full ECC rebuild of every module.
 - **ECC rebuild is all-or-nothing.** `ecc --script test:build` deletes and regenerates all specs and reads the `call-build-and-test-course` job from `build-and-test.yml`. Courses that use a different workflow file or job need `test/ui/regression-tests.sh` or a `--build-cmd` override.
@@ -177,7 +178,7 @@ npm run typecheck
 npm run dev -- --help
 ```
 
-Unit tests use fake run/build commands. **They cannot catch real-run bugs** (for example the absolute `--spec` path requirement was only found by running against a real course), so verify run/build changes against a throwaway course copy.
+Unit tests use fake run/build commands. **They cannot catch real-run bugs** (for example the absolute `--spec` path requirement was only found by running against a real course), so verify run/build changes against a real course checkout (e.g. under `/Users/jay/everfi/git/courses`).
 
 ## 10. Working in this repo with Claude Code
 

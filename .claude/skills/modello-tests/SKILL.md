@@ -28,14 +28,30 @@ Modello generates Cypress specs from a course's compiled content plus model conf
   - A real module run takes about 0.5-2 min. Failed tests are retried once.
 
 ## Reading failures
-- The JUnit `<failure>` stack only has webpack frames from modello's support code (for example `support/course/legacy-sdk/blocks/modal.js:13`, `assessment.js:52`), not the generated spec. So the page and block are NOT recoverable from the stack alone (open problem in this repo). Screenshots land in `test/ui/cypress/screenshots/<spec>/`, videos in `cypress/videos/`.
-- "Expected to find element ... never found it" after a 10s timeout is the classic stale-selector failure, but it can also mean the deployed course changed, or the support code is stale.
+- The failure stack only has webpack frames from modello's support code (for example `support/course/legacy-sdk/blocks/modal.js:11`, `assessment.js:52`), never the generated spec. This is true with the JUnit reporter AND with Cypress's default reporter (checked both), so the page and block are NOT recoverable from the stack.
+- What you do have: the **selector in the message** (``Expected to find element: `#btn2-stale`, but never found it``). Search `test/ui/model-parameters.json` for that string to find the page and block key, then read the course source (`app/modules/<m>/<a>/<page>/content.yml`) for the real id.
+- "Expected to find element ... never found it" after a 10s timeout is the classic stale-selector failure. It can also be a timing flake (see below) or a deployed-course change.
+- Cypress clears `cypress/screenshots` and `cypress/videos` at the start of every run, so only the last run's artifacts survive. A passing run leaves none.
 
-## Baseline (observed 2026-10-11, digital-banking, S3 develop, a scratch copy)
-All four specs failed on the unmodified course: m1, m2, m3 at `.modal__header__close button`, m4 at `[data-action-type="assessment-question__container"]`. Check a spec's baseline before attributing a failure to your own change.
+## How modello uses the config (digital-banking, m3 as the example)
+- `model-map.json`: a block key mapped to `null` removes that block from the generated test (bypass); mapped to a filename it is replaced by that file from `test/ui/custom-code/` (for example `m1/a1/page-1` -> `modal.js`, whose body is `cy.modal(); cy.navigate();`). Many m3 pages use `addButton1.js` or per-page files such as `m3-a6-p5.js`.
+- `cy.modal(open, close = '.modal__header__close button')`: when called with no arguments (as in the custom `modal.js`) it waits up to 10s for that default close button. A failure naming `.modal__header__close button` therefore comes from a no-argument `cy.modal()`, most likely the intro modal.
+- `model-parameters.json` keys look like `"<section>" -> "<page>" -> "select_block_by_type(\"modal\";0)" -> { openModalSelector, closeModalSelector }`. m3 entries live under `&common` (the `s3`/`local`/`homeroom` sections only point back at it with `"...": "&common"`). A new key at the file root is NOT where the generator looks.
+- Regeneration is deterministic for config: a broken selector appears in the generated spec at exactly the matching `cy.*` call and nowhere else. Only the `block uid:` comments change between builds (mask them when diffing: `sed -E 's/block uid: [0-9a-f-]+/block uid: X/'`).
+
+## Checking "what changed in the course"
+1. `app/` YAML is the source: `git fetch` and compare with `origin/develop`; check `git log -1` against the deploy time.
+2. Compiled content `public/content/` is git-ignored and can be stale. Compare with what is deployed: `curl https://<s3 baseUrl>/content/module-content.json` (headers show `Last-Modified`) and deep-diff the JSON per module.
+3. To regenerate tests against the deployed content without a full `yarn install`, copy the deployed `module-content.json` and `modules.json` into `public/content/` of a **scratch copy** and run `ecc --script test:build`.
+- Observed 2026-10-11 (digital-banking): local `public/` was from 12 Aug while S3 `develop` was deployed 9 Oct. Only 52 differences: `m3/a7/page-2` (lottie blocks now wrapped in `container` blocks) and `m2/a6/page-2`, `m2/a3/page-3`, `m2/a3/page-5`; m1 and m4 identical. Specs generated from either content were identical after masking UIDs, so these changes did not alter generation.
+
+## Baseline and flakiness (observed 2026-10-11, digital-banking, S3 develop)
+- First runs on the unmodified course: m1 (1m49s), m2 and m3 failed at `.modal__header__close button`; m4 failed at `[data-action-type="assessment-question__container"]`.
+- A later rerun of m3 PASSED (6m20s) with the same spec against the same deployed course (its `Last-Modified` pre-dated every run). So these failures are flaky, not a stable config problem. Re-run a failing spec before attributing it to config, and never "fix" a failure that does not reproduce.
+- A real module run takes 1 to 6+ minutes. A deliberately broken selector on an early page fails fast (about 1 minute).
 
 ## Fixer agent (this repo)
 - Dry-run: `npm run dev -- --project <course-root> [--spec <file>]`. Apply: add `--write`. `--local` builds with `ecc --script test:local`. Override commands with `--run-cmd` ({spec}, {report}) and `--build-cmd`. Docs: `docs/architecture.md`.
-- It may only edit `model-parameters.json`, `model-map.json`, `model-edges.json`; it never edits course source or generated specs, and never commits.
-- `--write` runs the ECC build, which deletes and regenerates `cypress/e2e`. Use a throwaway copy of the course for experiments.
+- It may only edit `model-parameters.json`, `model-map.json`, `model-edges.json`; it never edits course source or generated specs, and never commits. `set_model_value` edits EXISTING entries only: a path that does not exist is rejected with a hint (existing keys, and where the key does exist), unless `create: true`. (Before this guard, an agent that left out `&common` silently created a stray root key.)
+- `--write` runs the ECC build, which deletes and regenerates `cypress/e2e`. Real checkouts are in `/Users/jay/everfi/git/courses`; it is fine to run there (e2e is gitignored). Never commit to a course repo; the owner keeps or discards model-file changes manually.
 - Needs `ecc`, `yq` and `modello` on PATH; preflight checks this. Costs money (`--max-budget-usd`, default 5).
