@@ -28,6 +28,9 @@ CI (build and test, on test/**) verifies the pushed branch. You raise the PR and
   --serve                  Show the live UI on http://localhost:<port> while it runs
   --port <n>               UI port (default 4317)
   --skip-install           Do not run the dependency install
+  --skip-cypress-verify    Do not check that Cypress can start (preflight)
+  --skip-flaky-check       Do not retry a failing spec once before fixing it
+  --skip-recipes           Do not try rule-based fixes before AI agents
   --install-cmd <c>        Dependency install (default "yarn install --frozen-lockfile --prefer-offline")
   --skip-course-build      Reuse the existing compiled course in public/
   --course-build-cmd <c>   Course build command (default "ecc build --split")
@@ -52,6 +55,9 @@ const { values } = parseArgs({
     port: { type: 'string' },
     'skip-course-build': { type: 'boolean', default: false },
     'skip-install': { type: 'boolean', default: false },
+    'skip-flaky-check': { type: 'boolean', default: false },
+    'skip-recipes': { type: 'boolean', default: false },
+    'skip-cypress-verify': { type: 'boolean', default: false },
     'install-cmd': { type: 'string' },
     'course-build-cmd': { type: 'string' },
     'build-cmd': { type: 'string' },
@@ -136,6 +142,10 @@ const { ok, report, reportFile } = await runPipeline({
   courseBuildCommand: values['course-build-cmd'],
   skipCourseBuild: values['skip-course-build'],
   skipInstall: values['skip-install'],
+  flakyCheck: !values['skip-flaky-check'],
+  recipes: !values['skip-recipes'],
+  cypressVerifyCommand: values['skip-cypress-verify'] ? null : undefined,
+  ledgerFile: path.join(REPO, 'runs', 'fix-ledger.json'),
   installCommand: values['install-cmd'],
   allowDirty: [...LOCAL_ONLY, ...(values['allow-dirty'] ?? [])],
   maxTotalUsd: num(values['max-total-usd']),

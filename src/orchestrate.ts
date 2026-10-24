@@ -84,7 +84,7 @@ const config: Config | undefined = values.project
 const problems = config ? preflight(config) : ['no --project given'];
 
 const live = (bus: Bus) =>
-  orchestrate({ config: config!, specs: values.spec ?? [], concurrency, isolate: values.isolate ?? false, keepWorkspaces: values['keep-workspaces'], bus });
+  orchestrate({ config: config!, specs: values.spec ?? [], concurrency, isolate: values.isolate ?? false, ledgerFile: path.join(REPO, 'runs', 'fix-ledger.json'), keepWorkspaces: values['keep-workspaces'], bus });
 
 if (values.serve) {
   const port = num(values.port, 4317);

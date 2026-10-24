@@ -184,6 +184,19 @@ npm run fix-course -- --project /Users/jay/everfi/git/courses/digital-banking --
 | Commit | Only `test/ui/model-parameters.json`, `model-map.json`, `model-edges.json`. Refuses if any other tracked file changed. |
 | Push | Shows branch, files and message, asks `Push to origin? [y/N]` (`--push` skips the question; no terminal = no push). CI (`build and test`, runs on `test/**`) then verifies the branch. |
 
+### Cheapest step first (AI only where judgement is needed)
+
+| Order | Step | AI? |
+|---|---|---|
+| 1 | Run every spec, collect results | no |
+| 2 | **Environment triage**: no report, `MODULE_NOT_FOUND`, Electron, network, auth, Applitools key, disk -> "Needs human (environment)" with the evidence line | no |
+| 3 | **Flaky check**: retry each failure once; passing now = flaky, nothing changed | no |
+| 4 | **Recipes**, each verified by one batched rebuild + rerun, reverted if still failing: a fix from the ledger (`runs/fix-ledger.json`), translation markup `[name='x']` -> `[name*='x']`, stale `#id`/`[data-*=...]` with exactly one similar value in the course source | no |
+| 5 | Re-run a failing spec if an earlier fix changed anything (it may pass now) | no |
+| 6 | **Agent**, one at a time, with a **case file** (failure, selector, spec block, model entries, what was ruled out) so it starts deciding instead of exploring | yes |
+
+Agent token savings: tools load up front (no ToolSearch turn), no re-run of a spec it already has, narrow tools (`find_in_spec`, `get_model_entries`) instead of reading 50-70 KB specs, trimmed tool output (15 stack lines, 2,000-char tails), `node_modules`/`.yarn` off limits, `maxTurns` 20. The report shows, per module, whether a rule, a recipe or an agent handled it, plus cost and turns. Verified agent fixes are added to the ledger, so the same failure is fixed without AI next time. Switches: `--skip-flaky-check`, `--skip-recipes`, `--skip-cypress-verify`. Quality check: `npm run eval -- --yes` (spends a little; see `test/eval/`).
+
 You raise the PR (the link is printed) and merge; the tool never does. Exit codes: `0` everything passed or was fixed, `2` some modules need a human, `1` a stage failed. Options: `npm run fix-course -- --help`.
 
 ## 6b. Orchestrator and live UI

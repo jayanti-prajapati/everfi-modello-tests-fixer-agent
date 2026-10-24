@@ -121,6 +121,8 @@ function AgentRow({
           <span>{a.toolCount} tool calls</span>
           <span>{fmtTokens(a.inputTokens + a.outputTokens)} tokens</span>
           {a.costUsd !== undefined && <span>${a.costUsd.toFixed(2)}</span>}
+          {a.turns !== undefined && <span>{a.turns} turns</span>}
+          {a.method && a.method !== 'agent' && <span className="fg-success">no AI ({a.method})</span>}
         </span>
       </span>
       <Ring value={progress(a)} tone={look.tone} />

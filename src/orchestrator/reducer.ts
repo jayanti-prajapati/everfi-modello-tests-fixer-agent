@@ -5,6 +5,7 @@ import {
   STEPS,
   type AgentPlan,
   type AgentStatus,
+  type FixMethod,
   type MergeResult,
   type OrchestratorEvent,
   type PipelineStage,
@@ -30,6 +31,8 @@ export interface AgentState extends AgentPlan {
   outputTokens: number;
   costUsd?: number;
   summary?: string;
+  method?: FixMethod;
+  turns?: number;
   workspace?: string;
   startedAt?: number;
   finishedAt?: number;
@@ -157,6 +160,8 @@ export function reduce(state: RunState, e: OrchestratorEvent): RunState {
         status: e.status,
         summary: e.summary,
         costUsd: e.costUsd,
+        method: e.method,
+        turns: e.turns,
         finishedAt: e.t,
         cases: settleCases(a.cases, e.status),
       }));
@@ -195,6 +200,9 @@ function mergeCases(prev: TestCase[], next: TestCase[], run: number): TestCase[]
 function settleCases(cases: TestCase[], status: AgentStatus): TestCase[] {
   return cases.map((c) => {
     if (c.status !== 'fail') return c;
+    // Failed once, then passed on a plain retry (flaky) or after another module's fix: not blocked.
+    if (status === 'flaky') return { ...c, status: 'pass', message: `flaky: ${c.message ?? 'failed once'}; passed on retry` };
+    if (status === 'passed') return { ...c, status: 'pass' };
     if (status === 'proposed') return { ...c, status: 'proposed', method: 'agent' };
     if (status === 'fixed') return { ...c, status: 'fixed', method: 'agent' };
     return { ...c, status: 'blocker', method: 'human' };
@@ -203,7 +211,7 @@ function settleCases(cases: TestCase[], status: AgentStatus): TestCase[] {
 
 /** Share of the pipeline that is finished (done/skipped/failed), 0..1. */
 export function progress(a: AgentState): number {
-  if (['passed', 'fixed', 'proposed', 'unfixable', 'error', 'skipped'].includes(a.status)) return 1;
+  if (['passed', 'fixed', 'proposed', 'unfixable', 'error', 'skipped', 'flaky'].includes(a.status)) return 1;
   const finished = STEPS.filter((s) => ['done', 'skipped', 'failed'].includes(a.steps[s])).length;
   const running = STEPS.some((s) => a.steps[s] === 'running') ? 0.5 : 0;
   return (finished + running) / STEPS.length;

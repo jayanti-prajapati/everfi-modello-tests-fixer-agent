@@ -4,6 +4,7 @@ import path from 'node:path';
 import { absModelDir, absSpecDir, fill, type Config } from './config.js';
 import { enrichFailures, parseJUnit, parseJUnitCases, type TestCaseResult } from './failures.js';
 import { applyPatch, GuardError, resolveModelFile, serializeLike, type Patch } from './guard.js';
+import { findInSpec, findModelEntries, pageEntries } from './locate.js';
 import { runShell } from './shell.js';
 
 export type Outcome = { status: 'fixed' | 'proposed' | 'unfixable'; summary: string };
@@ -14,6 +15,9 @@ export interface Proposal extends Patch {
 }
 
 const SAFE_NAME = /^[\w.-]+$/;
+/** Tool results go back to the model on every later turn: keep them short. */
+const TAIL = 2000;
+const STACK_LINES = 15;
 
 /** Side effects observed by the orchestrator (the CLI does not listen). */
 export type SessionEvent =
@@ -39,6 +43,20 @@ export class Session {
     const p = path.join(absSpecDir(this.config), spec);
     if (!fs.existsSync(p)) throw new GuardError(`spec "${spec}" not found in ${absSpecDir(this.config)}`);
     return p;
+  }
+
+  findInSpec(spec: string, text: string) {
+    const blocks = findInSpec(fs.readFileSync(this.specPath(spec), 'utf8'), text, 8);
+    return blocks.length ? blocks : `"${text}" does not appear in ${spec}`;
+  }
+
+  modelEntries({ value, page }: { value?: string; page?: string }) {
+    if (page) return pageEntries(this.config, page, 6000) || `no entries for page ${page}`;
+    if (value) {
+      const hits = findModelEntries(this.config, value, true).slice(0, 30);
+      return hits.length ? hits : `no model value contains "${value}"`;
+    }
+    throw new GuardError('pass value or page');
   }
 
   listSpecs(): string[] {
@@ -73,10 +91,14 @@ export class Session {
     const res = await runShell(cmd, this.config.projectDir);
     if (!fs.existsSync(report)) {
       this.listener({ kind: 'run', spec, run: this.runs, status: 'no_report', cases: [] });
-      return { status: 'no_report', exitCode: res.code, timedOut: res.timedOut, outputTail: res.output };
+      return { status: 'no_report', exitCode: res.code, timedOut: res.timedOut, outputTail: res.output.slice(-TAIL) };
     }
     const xml = fs.readFileSync(report, 'utf8');
-    const failures = enrichFailures(parseJUnit(xml), absSpecDir(this.config));
+    // Keep the top of each stack: the cause is there, and full stacks cost tokens every turn.
+    const failures = enrichFailures(parseJUnit(xml), absSpecDir(this.config)).map((f) => ({
+      ...f,
+      stack: f.stack.split('\n').slice(0, STACK_LINES).join('\n'),
+    }));
     const status = failures.length === 0 && res.code === 0 ? 'passed' : 'failed';
     this.listener({ kind: 'run', spec, run: this.runs, status, cases: parseJUnitCases(xml) });
     return { status, exitCode: res.code, failures };
@@ -99,6 +121,6 @@ export class Session {
     if (!this.config.write) throw new GuardError('rebuild is disabled in dry-run mode');
     const res = await runShell(this.config.buildCommand, this.config.projectDir);
     this.listener({ kind: 'rebuild', exitCode: res.code });
-    return { exitCode: res.code, outputTail: res.output, specsAfterBuild: this.listSpecs() };
+    return { exitCode: res.code, outputTail: res.output.slice(-TAIL), specsAfterBuild: this.listSpecs() };
   }
 }

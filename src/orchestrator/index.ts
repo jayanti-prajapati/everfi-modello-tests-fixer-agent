@@ -7,7 +7,11 @@ import { Session, type Proposal, type SessionEvent } from '../session.js';
 import { runShell } from '../shell.js';
 import { SERVER_NAME } from '../tools/index.js';
 import type { Bus } from './bus.js';
-import type { AgentPlan, AgentStatus, MergeResult, StepId, StepStatus, TestCase } from './events.js';
+import { buildCaseFile } from '../casefile.js';
+import { locate } from '../locate.js';
+import { loadLedger, proposeFix, recordFix, type RecipeFix } from '../recipes.js';
+import { environmentProblem } from '../triage.js';
+import type { AgentPlan, AgentStatus, FixMethod, MergeResult, StepId, StepStatus, TestCase } from './events.js';
 import { mergeProposals, revertPatches, type AgentPatches } from './merger.js';
 import { runPool } from './scheduler.js';
 import { assertInside, createWorkspace, removeWorkspace } from './workspace.js';
@@ -30,6 +34,12 @@ export interface OrchestrateOptions {
   workspaceRoot?: string;
   /** Stop starting new agents once finished agents have spent this much (USD) */
   maxTotalUsd?: number;
+  /** Real course mode: retry each failure once before any fixing (default true) */
+  flakyCheck?: boolean;
+  /** Real course mode, write: try deterministic recipes before agents (default true) */
+  recipes?: boolean;
+  /** JSON file of verified fixes, reused before recipes and agents */
+  ledgerFile?: string;
   bus: Bus;
 }
 
@@ -45,6 +55,10 @@ export interface AgentSummary extends AgentPlan {
   costUsd?: number;
   /** Leaf changes the agent recorded or applied in its workspace */
   patches: Proposal[];
+  /** How the module was handled (rule, recipe or AI agent) */
+  method?: FixMethod;
+  /** Agent turns (model round trips) */
+  turns?: number;
 }
 
 export const moduleOf = (spec: string) => /-(m\d+)-/.exec(spec)?.[1] ?? spec.replace(/\.js$/, '');
@@ -105,11 +119,22 @@ export async function orchestrate(o: OrchestrateOptions): Promise<OrchestrateRes
 
 type RunResult = Awaited<ReturnType<Session['runSpec']>>;
 
+interface Pending {
+  plan: AgentPlan;
+  result: RunResult | undefined;
+  /** What rules and recipes found out; goes into the agent's case file */
+  notes: string[];
+}
+
 /**
- * Real course mode. Phase 1: run every spec in the checkout, `concurrency` at a time (plain
- * Cypress, no agent, no spend). Phase 2: for each failing module, one agent at a time diagnoses,
- * changes a value, rebuilds and verifies; the agent starts from the phase 1 result. A change
- * that does not end verified is reverted (and specs rebuilt) before the next agent starts.
+ * Real course mode, cheapest step first:
+ *  1. test   - run every spec in the checkout, `concurrency` at a time (plain Cypress, no AI)
+ *  2. triage - environment failures go to a human with the evidence line (no AI)
+ *  3. flaky  - re-run each remaining failure once; passing now = flaky, no change (no AI)
+ *  4. recipe - ledger / translation markup / stale selector with exactly one candidate; all
+ *              recipe changes applied, ONE rebuild, affected specs re-run; failures reverted (no AI)
+ *  5. agents - one at a time, each with a case file; a spec is re-run first if anything changed
+ *              since its last run (an earlier fix may have fixed it too)
  */
 async function testThenFix(
   agents: AgentPlan[],
@@ -118,48 +143,175 @@ async function testThenFix(
   addCost: (c: number) => void,
 ): Promise<AgentSummary[]> {
   const { bus, config } = o;
-  const tested = await runPool(agents, o.concurrency, async (plan) => {
-    const id = plan.agentId;
-    bus.publish({ type: 'agent.started', agentId: id });
-    bus.publish({ type: 'step', agentId: id, step: 'run', status: 'running' });
+  const course = path.basename(config.projectDir);
+  const byId = new Map<string, AgentSummary>();
+  const finish = (plan: AgentPlan, status: AgentStatus, summary: string, extra: Partial<AgentSummary> = {}) => {
+    const a: AgentSummary = { ...plan, status, summary, costUsd: 0, patches: [], ...extra };
+    bus.publish({ type: 'agent.finished', agentId: plan.agentId, status, summary, costUsd: a.costUsd, method: a.method, turns: a.turns });
+    byId.set(plan.agentId, a);
+    return a;
+  };
+  const step = (id: string, s: StepId, status: StepStatus) => bus.publish({ type: 'step', agentId: id, step: s, status });
+  const skipRest = (id: string, from: StepId[]) => from.forEach((s) => step(id, s, 'skipped'));
+  const runOnce = async (plan: AgentPlan, run: number): Promise<RunResult | undefined> => {
     const session = new Session({ ...config, maxAttempts: 1 }, (e) => {
-      if (e.kind === 'run') bus.publish({ type: 'cases', agentId: id, run: 1, cases: toCases(e.cases, e.status) });
+      if (e.kind === 'run') bus.publish({ type: 'cases', agentId: plan.agentId, run, cases: toCases(e.cases, e.status) });
     });
-    let result: RunResult | undefined;
     try {
-      result = await session.runSpec(plan.spec);
+      return await session.runSpec(plan.spec);
     } catch (e) {
-      bus.publish({ type: 'log', level: 'error', message: `${id}: could not run ${plan.spec}: ${e instanceof Error ? e.message : e}` });
+      bus.publish({ type: 'log', level: 'error', message: `${plan.agentId}: could not run ${plan.spec}: ${e instanceof Error ? e.message : e}` });
+      return undefined;
     }
+  };
+
+  // 1. Test every spec.
+  const tested = await runPool(agents, o.concurrency, async (plan) => {
+    bus.publish({ type: 'agent.started', agentId: plan.agentId });
+    step(plan.agentId, 'run', 'running');
+    const result = await runOnce(plan, 1);
     const passed = result?.status === 'passed';
-    bus.publish({ type: 'step', agentId: id, step: 'run', status: passed ? 'done' : 'failed' });
+    step(plan.agentId, 'run', passed ? 'done' : 'failed');
     if (passed) {
-      for (const step of ['diagnose', 'fix', 'rebuild', 'verify'] as const) bus.publish({ type: 'step', agentId: id, step, status: 'skipped' });
-      bus.publish({ type: 'step', agentId: id, step: 'report', status: 'done' });
-      bus.publish({ type: 'agent.finished', agentId: id, status: 'passed', summary: 'Spec passed; no agent needed.', costUsd: 0 });
+      skipRest(plan.agentId, ['diagnose', 'fix', 'rebuild', 'verify']);
+      step(plan.agentId, 'report', 'done');
+      finish(plan, 'passed', 'Spec passed; no agent needed.', { method: 'rule' });
     }
-    return { plan, result, passed };
+    return { plan, result, notes: [] as string[], passed };
+  });
+  let pending: Pending[] = tested.filter((t) => !t.passed);
+
+  // 2. Environment triage.
+  pending = pending.filter((p) => {
+    const reason = p.result ? environmentProblem(p.result) : 'the spec could not be run';
+    if (!reason) return true;
+    skipRest(p.plan.agentId, ['diagnose', 'fix', 'rebuild', 'verify']);
+    step(p.plan.agentId, 'report', 'done');
+    finish(p.plan, 'unfixable', `Needs human (environment): ${reason}. Not a model-config problem; no agent started.`, { method: 'rule' });
+    return false;
   });
 
-  const failed = tested.filter((t) => !t.passed);
-  o.onTested?.(failed.map((t) => t.plan));
-  const byId = new Map<string, AgentSummary>();
-  for (const t of tested) if (t.passed) byId.set(t.plan.agentId, { ...t.plan, status: 'passed', summary: 'Spec passed; no agent needed.', costUsd: 0, patches: [] });
+  // 3. Flaky check: one plain retry.
+  if (o.flakyCheck !== false && pending.length) {
+    const retried = await runPool(pending, o.concurrency, async (p) => ({ p, retry: await runOnce(p.plan, 1) }));
+    pending = [];
+    for (const { p, retry } of retried) {
+      if (retry?.status === 'passed') {
+        skipRest(p.plan.agentId, ['diagnose', 'fix', 'rebuild', 'verify']);
+        step(p.plan.agentId, 'report', 'done');
+        finish(p.plan, 'flaky', 'Failed once, passed on a plain retry (flaky). No change made; worth a look if it repeats.', { method: 'rule' });
+      } else {
+        pending.push({ ...p, result: retry ?? p.result });
+      }
+    }
+  }
+  o.onTested?.(pending.map((p) => p.plan));
 
-  // One agent at a time: each one's writes and rebuild finish before the next one starts.
-  for (const t of failed) {
+  // 4. Recipes: write mode only (a recipe must be verified by a rebuild and a passing run).
+  let changedSince = false;
+  if (config.write && o.recipes !== false && pending.length) {
+    const ledger = loadLedger(o.ledgerFile);
+    const applied: { p: Pending; fix: RecipeFix; proposal?: Proposal }[] = [];
+    const keys = new Map<string, unknown>();
+    const session = new Session(config);
+    for (const p of pending) {
+      if (!p.result) continue;
+      const loc = locate(config, p.plan.spec, p.result);
+      const prop = proposeFix(config, loc, { course, ledger });
+      if (!prop.fix) {
+        p.notes.push(`No recipe: ${prop.note}`);
+        continue;
+      }
+      const key = `${prop.fix.patch.file}${JSON.stringify(prop.fix.patch.path)}`;
+      if (keys.has(key) && keys.get(key) !== prop.fix.patch.value) {
+        p.notes.push(`Recipe skipped: another module needs a different value for ${JSON.stringify(prop.fix.patch.path)}.`);
+        continue;
+      }
+      step(p.plan.agentId, 'diagnose', 'done');
+      let proposal: Proposal | undefined;
+      if (!keys.has(key)) {
+        session.setValue(prop.fix.patch);
+        proposal = session.proposals.at(-1);
+        keys.set(key, prop.fix.patch.value);
+        bus.publish({ type: 'proposal', agentId: p.plan.agentId, file: prop.fix.patch.file, path: prop.fix.patch.path, before: prop.fix.before, value: prop.fix.patch.value, applied: true });
+      }
+      step(p.plan.agentId, 'fix', 'done');
+      applied.push({ p, fix: prop.fix, proposal });
+    }
+    if (applied.length) {
+      bus.publish({ type: 'log', level: 'info', message: `Applied ${applied.length} recipe fix(es) without AI; rebuilding once.` });
+      applied.forEach((a) => step(a.p.plan.agentId, 'rebuild', 'running'));
+      const built = await runShell(config.buildCommand, config.projectDir);
+      applied.forEach((a) => step(a.p.plan.agentId, 'rebuild', built.code === 0 ? 'done' : 'failed'));
+      const verified = await runPool(applied, o.concurrency, async (a) => {
+        step(a.p.plan.agentId, 'verify', 'running');
+        const r = built.code === 0 ? await runOnce(a.p.plan, 2) : undefined;
+        return { a, r, ok: r?.status === 'passed' };
+      });
+      const failed = verified.filter((v) => !v.ok);
+      // Keys shared with a failed module are reverted too: a value only stays if every module using it passed.
+      const badKeys = new Set(failed.map((v) => `${v.a.fix.patch.file}${JSON.stringify(v.a.fix.patch.path)}`));
+      const proposals = applied.flatMap((a) => (a.proposal ? [a.proposal] : []));
+      const toRevert = proposals.filter((pr) => badKeys.has(`${pr.file}${JSON.stringify(pr.path)}`));
+      if (toRevert.length) {
+        revertPatches(absModelDir(config), toRevert);
+        await runShell(config.buildCommand, config.projectDir);
+      }
+      pending = pending.filter((p) => !verified.some((v) => v.a.p === p));
+      for (const { a, r, ok } of verified) {
+        const key = `${a.fix.patch.file}${JSON.stringify(a.fix.patch.path)}`;
+        const id = a.p.plan.agentId;
+        if (ok && !badKeys.has(key)) {
+          step(id, 'verify', 'done');
+          step(id, 'report', 'done');
+          recordFix(o.ledgerFile, course, a.fix.before, String(a.fix.patch.value), a.fix.recipe);
+          finish(a.p.plan, 'fixed', `Fixed without AI (${a.fix.recipe}): ${a.fix.before} -> ${a.fix.patch.value}. ${a.fix.evidence}`, {
+            method: 'recipe',
+            patches: a.proposal ? [a.proposal] : [],
+          });
+          changedSince = true;
+        } else {
+          step(id, 'verify', 'failed');
+          a.p.notes.push(`Tried ${a.fix.recipe} recipe ${a.fix.before} -> ${a.fix.patch.value} (${a.fix.evidence}); after rebuild the spec still failed${r?.failures?.[0] ? `: ${r.failures[0].message.slice(0, 200)}` : ''}. Reverted.`);
+          pending.push({ ...a.p, result: r && r.status !== 'passed' ? r : a.p.result });
+        }
+      }
+    }
+  }
+
+  // 5. Agents, one at a time.
+  for (const p of pending) {
+    let result = p.result;
+    if (changedSince) {
+      // An earlier fix may have fixed this module too: a plain re-run is far cheaper than an agent.
+      result = await runOnce(p.plan, 1);
+      if (result?.status === 'passed') {
+        skipRest(p.plan.agentId, ['diagnose', 'fix', 'rebuild', 'verify']);
+        step(p.plan.agentId, 'report', 'done');
+        finish(p.plan, 'passed', 'Passes after an earlier fix in this run; no agent needed.', { method: 'rule' });
+        continue;
+      }
+    }
     if (o.maxTotalUsd !== undefined && spent() >= o.maxTotalUsd) {
-      const summary = `Not started: total budget $${o.maxTotalUsd} reached ($${spent().toFixed(2)} spent).`;
-      bus.publish({ type: 'agent.finished', agentId: t.plan.agentId, status: 'skipped', summary });
-      byId.set(t.plan.agentId, { ...t.plan, status: 'skipped', summary, patches: [] });
+      finish(p.plan, 'skipped', `Not started: total budget $${o.maxTotalUsd} reached ($${spent().toFixed(2)} spent).${p.notes.length ? ` ${p.notes.join(' ')}` : ''}`);
       continue;
     }
-    const a = await runAgent(t.plan, o, '', t.result);
+    const loc = result ? locate(config, p.plan.spec, result) : { blocks: [], entries: [] };
+    const caseFile = result ? buildCaseFile(config, p.plan.spec, result, loc, p.notes) : undefined;
+    const a = await runAgent(p.plan, o, '', result, caseFile);
     addCost(a.costUsd ?? 0);
     if (config.write && a.status !== 'fixed') await revertUnverified(a, o);
-    byId.set(t.plan.agentId, a);
+    if (a.status === 'fixed') {
+      changedSince = true;
+      // Remember what fixed this selector, so the same failure is fixed without AI next time.
+      const p0 = a.patches.find((x) => x.applied && typeof x.value === 'string');
+      if (loc.selector && p0 && loc.entries.some((e) => JSON.stringify(e.path) === JSON.stringify(p0.path))) {
+        recordFix(o.ledgerFile, course, loc.selector, String(p0.value), 'agent');
+      }
+    }
+    byId.set(p.plan.agentId, a);
   }
-  return agents.map((p) => byId.get(p.agentId)!);
+  return agents.map((plan) => byId.get(plan.agentId)!);
 }
 
 /** Real course mode: an agent's applied change that did not end verified must not stay in the checkout. */
@@ -192,8 +344,8 @@ async function mergeBack({ config, bus }: OrchestrateOptions, summaries: AgentSu
   return results;
 }
 
-/** `firstResult`: real course mode passes the test-phase result, so the agent does not re-run the spec. */
-async function runAgent(plan: AgentPlan, o: OrchestrateOptions, root: string, firstResult?: RunResult): Promise<AgentSummary> {
+/** `firstResult`/`caseFile`: real course mode passes what it already knows, so the agent does not re-run or re-explore. */
+async function runAgent(plan: AgentPlan, o: OrchestrateOptions, root: string, firstResult?: RunResult, caseFile?: string): Promise<AgentSummary> {
   const { bus } = o;
   const id = plan.agentId;
   let workspace: string | undefined;
@@ -237,14 +389,23 @@ async function runAgent(plan: AgentPlan, o: OrchestrateOptions, root: string, fi
     patches = session.proposals;
     if (firstResult) session.seed(plan.spec, firstResult);
 
-    let inputTokens = 0;
-    let outputTokens = 0;
+    // The SDK emits one assistant message per content block, all carrying the same API message's
+    // usage (and early ones partial): keep the latest usage per message id and sum those.
+    const usageById = new Map<string, { input: number; output: number }>();
     const onMessage = (msg: SDKMessage) => {
       if (msg.type !== 'assistant') return;
       const u = msg.message.usage;
       if (u) {
-        inputTokens += (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-        outputTokens += u.output_tokens ?? 0;
+        usageById.set(msg.message.id ?? String(usageById.size), {
+          input: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+          output: u.output_tokens ?? 0,
+        });
+        let inputTokens = 0;
+        let outputTokens = 0;
+        for (const v of usageById.values()) {
+          inputTokens += v.input;
+          outputTokens += v.output;
+        }
         bus.publish({ type: 'usage', agentId: id, inputTokens, outputTokens });
       }
       for (const block of msg.message.content) {
@@ -257,7 +418,8 @@ async function runAgent(plan: AgentPlan, o: OrchestrateOptions, root: string, fi
       }
     };
 
-    const result = await runFixer(config, [plan.spec], () => {}, { session, onMessage });
+    const result = await runFixer(config, [plan.spec], () => {}, { session, onMessage, caseFile });
+    const turns = usageById.size;
     const outcome = session.outcome;
     let status: AgentStatus = !outcome
       ? 'error'
@@ -273,13 +435,13 @@ async function runAgent(plan: AgentPlan, o: OrchestrateOptions, root: string, fi
       summary += ' [Orchestrator: not verified by a rebuild and passing run after the last change; not kept.]';
     }
     steps.finish(status !== 'error');
-    bus.publish({ type: 'agent.finished', agentId: id, status, summary, costUsd: result.costUsd });
-    return { ...plan, status, summary, costUsd: result.costUsd, patches };
+    bus.publish({ type: 'agent.finished', agentId: id, status, summary, costUsd: result.costUsd, method: 'agent', turns });
+    return { ...plan, status, summary, costUsd: result.costUsd, patches, method: 'agent', turns };
   } catch (e) {
     const summary = e instanceof Error ? e.message : String(e);
     steps.finish(false);
-    bus.publish({ type: 'agent.finished', agentId: id, status: 'error', summary });
-    return { ...plan, status: 'error', summary, patches };
+    bus.publish({ type: 'agent.finished', agentId: id, status: 'error', summary, method: 'agent' });
+    return { ...plan, status: 'error', summary, patches, method: 'agent' };
   } finally {
     if (o.isolate && workspace && !o.keepWorkspaces) removeWorkspace(workspace);
   }

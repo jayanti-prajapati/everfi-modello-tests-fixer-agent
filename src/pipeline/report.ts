@@ -36,7 +36,10 @@ const STATUS_NOTE: Record<string, string> = {
   unfixable: 'needs a human',
   error: 'agent error',
   skipped: 'not run (budget)',
+  flaky: 'flaky (failed once, passed on retry)',
 };
+
+const METHOD: Record<string, string> = { rule: 'rule, no AI', recipe: 'recipe, no AI', agent: 'AI agent' };
 
 /** Agents whose change is in the checkout and was verified by their own rebuild + passing rerun. */
 export function verifiedFixes(r: PipelineReport): AgentSummary[] {
@@ -86,11 +89,13 @@ export function renderReport(r: PipelineReport): string {
   ];
   if (r.error) out.push('', `**Stopped with an error:** ${r.error}`);
 
-  out.push('', '## Modules', '', '| Module | Result | Cost | Summary |', '|---|---|---|---|');
+  out.push('', '## Modules', '', '| Module | Result | Handled by | Cost | Turns | Summary |', '|---|---|---|---|---|---|');
   for (const a of r.agents) {
     const v = r.verify.find((x) => x.agentId === a.agentId);
     const result = v && !v.passed ? 'fix reverted (failed in checkout)' : (STATUS_NOTE[a.status] ?? a.status);
-    out.push(`| ${a.module} | ${result} | ${a.costUsd !== undefined ? `$${a.costUsd.toFixed(2)}` : '-'} | ${a.summary.replace(/\|/g, '\\|').replace(/\n/g, ' ')} |`);
+    out.push(
+      `| ${a.module} | ${result} | ${METHOD[a.method ?? ''] ?? '-'} | ${a.costUsd !== undefined ? `$${a.costUsd.toFixed(2)}` : '-'} | ${a.turns ?? '-'} | ${a.summary.replace(/\|/g, '\\|').replace(/\n/g, ' ')} |`,
+    );
   }
 
   const changes = r.agents.flatMap((a) => a.patches.map((p) => ({ a, p })));

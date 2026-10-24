@@ -7,7 +7,9 @@ export type StepId = (typeof STEPS)[number];
 export type StepStatus = 'waiting' | 'running' | 'done' | 'skipped' | 'failed';
 
 /** passed = spec was green on the first run, nothing to do. error = the agent crashed or reported nothing. skipped = budget reached before it started. */
-export type AgentStatus = 'queued' | 'running' | 'passed' | 'fixed' | 'proposed' | 'unfixable' | 'error' | 'skipped';
+export type AgentStatus = 'queued' | 'running' | 'passed' | 'fixed' | 'proposed' | 'unfixable' | 'error' | 'skipped' | 'flaky';
+/** How a module was handled: by a rule (environment/flaky), a deterministic recipe, or an AI agent */
+export type FixMethod = 'rule' | 'recipe' | 'agent';
 
 /** Stages of the local fix pipeline (fix-course), in order. */
 export const PIPELINE_STAGES = ['preflight', 'branch', 'install', 'build', 'generate', 'test', 'fix', 'verify', 'report', 'commit', 'push'] as const;
@@ -77,7 +79,7 @@ export type EventBody =
       value: unknown;
       applied: boolean;
     }
-  | { type: 'agent.finished'; agentId: string; status: AgentStatus; summary: string; costUsd?: number }
+  | { type: 'agent.finished'; agentId: string; status: AgentStatus; summary: string; costUsd?: number; method?: FixMethod; turns?: number }
   | { type: 'merge'; results: MergeResult[] }
   | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string }
   | { type: 'run.finished'; costUsd: number };

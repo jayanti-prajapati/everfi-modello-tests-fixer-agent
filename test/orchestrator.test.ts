@@ -22,12 +22,13 @@ const fakePatches: Record<string, Omit<Patch, 'file'> & { file?: Patch['file'] }
 /** Specs whose fake agent claims "fixed" without rebuilding or rerunning */
 const claimsOnly = new Set<string>();
 /** What the fake agents did: which specs, how many ran at once, attempts counted at their first run */
-const agentLog = { calls: [] as string[], active: 0, peak: 0, runsAfterFirst: [] as number[] };
+const agentLog = { calls: [] as string[], active: 0, peak: 0, runsAfterFirst: [] as number[], caseFiles: [] as (string | undefined)[] };
 vi.mock('../src/agent.js', () => ({
   runFixer: async (config: Config, specs: string[], _log: unknown, hooks: FixerHooks) => {
     const s = hooks.session!;
     const spec = specs[0];
     agentLog.calls.push(spec);
+    agentLog.caseFiles.push(hooks.caseFile);
     agentLog.peak = Math.max(agentLog.peak, ++agentLog.active);
     await new Promise((r) => setTimeout(r, 5));
     const tool = (name: string, input: object) =>
@@ -81,7 +82,7 @@ beforeEach(() => {
   fs.writeFileSync(paramsFile(), JSON.stringify(PARAMS, null, 4) + '\n');
   for (const k of Object.keys(fakePatches)) delete fakePatches[k];
   claimsOnly.clear();
-  Object.assign(agentLog, { calls: [], active: 0, peak: 0, runsAfterFirst: [] });
+  Object.assign(agentLog, { calls: [], active: 0, peak: 0, runsAfterFirst: [], caseFiles: [] });
 });
 
 /** Every module with a fake patch starts broken: its spec fails until the value changes. */
@@ -183,6 +184,22 @@ describe('orchestrate in the real course folder', () => {
     const { summaries } = await real();
     expect(agentLog.calls).toEqual(['c-m1-s3.js']);
     expect(summaries.map((s) => [s.module, s.status, s.costUsd])).toEqual([['m1', 'fixed', 0.01], ['m2', 'passed', 0]]);
+  });
+
+  it('sends environment failures to a human without starting an agent', async () => {
+    const bus = new Bus();
+    // `true` writes no JUnit report: Cypress "ran" but produced nothing.
+    const { agents } = await orchestrate({ config: cfg({ runCommand: 'true' }), specs: [], concurrency: 2, isolate: false, bus });
+    expect(agentLog.calls).toEqual([]);
+    expect(agents.map((a) => [a.status, a.method])).toEqual([['unfixable', 'rule'], ['unfixable', 'rule']]);
+    expect(agents[0].summary).toMatch(/environment.*no test report/i);
+  });
+
+  it('hands the agent a case file with what is already known', async () => {
+    fakePatches['c-m1-s3.js'] = { path: ['&common', 'p1', 'b', 'selector'], value: '#new1' };
+    await real();
+    expect(agentLog.caseFiles[0]).toMatch(/Spec: c-m1-s3\.js/);
+    expect(agentLog.caseFiles[0]).toMatch(/Test-phase result/);
   });
 
   it('reverts a change the agent did not verify', async () => {

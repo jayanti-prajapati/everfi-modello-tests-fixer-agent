@@ -82,6 +82,12 @@ export interface PipelineOptions {
   allowDirty?: string[];
   maxTotalUsd?: number;
   workspaceRoot?: string;
+  /** Verified fixes reused before recipes/agents (default: none) */
+  ledgerFile?: string;
+  flakyCheck?: boolean;
+  recipes?: boolean;
+  /** Checks Cypress can start before any spend; null to skip. Default: verify modello's Cypress. */
+  cypressVerifyCommand?: string | null;
   /** Tool checks before any spend; defaults to the fixer's preflight (ecc, yq, modello, workflow file) */
   checkTools?: (c: Config) => string[];
   now?: () => Date;
@@ -96,6 +102,9 @@ export interface PipelineResult {
 class StageError extends Error {}
 
 export const DEFAULT_INSTALL = 'yarn install --frozen-lockfile --prefer-offline';
+/** The Cypress that `modello run` uses lives in modello's install; verify it before spending anything. */
+export const DEFAULT_CYPRESS_VERIFY =
+  '"$(dirname "$(readlink -f "$(command -v modello)")")/../node_modules/cypress/bin/cypress" verify';
 
 /** The lines that say what went wrong (ECC prints the cause first, then a long stack), else the tail. */
 export function failureDetail(output: string, max = 600): string {
@@ -157,6 +166,11 @@ export async function runPipeline(o: PipelineOptions): Promise<PipelineResult> {
         if (yarn.code !== 0) problems.push('yarn not found on PATH (needed to install course dependencies; or pass --skip-install)');
       }
       if (problems.length) throw new Error(problems.join('; '));
+      const verifyCmd = o.cypressVerifyCommand === undefined ? DEFAULT_CYPRESS_VERIFY : o.cypressVerifyCommand;
+      if (verifyCmd) {
+        const v = await runShell(verifyCmd, cwd);
+        if (v.code !== 0) throw new Error(`Cypress cannot start (${verifyCmd}): ${failureDetail(v.output)}`);
+      }
       if (fs.realpathSync(await G.repoRoot(cwd)) !== fs.realpathSync(cwd)) throw new Error(`${cwd} is not the root of its git repo`);
       if (path.isAbsolute(config.modelDir)) throw new Error('--model-dir must be relative to the course root');
       await G.assertClean(cwd, allowDirty);
@@ -227,10 +241,13 @@ export async function runPipeline(o: PipelineOptions): Promise<PipelineResult> {
         concurrency: o.concurrency,
         isolate: false,
         maxTotalUsd: o.maxTotalUsd,
+        ledgerFile: o.ledgerFile,
+        flakyCheck: o.flakyCheck,
+        recipes: o.recipes,
         bus,
         onTested: (failed) => {
           tested = true;
-          bus.publish({ type: 'stage', stage: 'test', status: 'done', detail: `${specs!.length - failed.length}/${specs!.length} passed` });
+          bus.publish({ type: 'stage', stage: 'test', status: 'done', detail: failed.length ? `${failed.length} of ${specs!.length} need a fix` : 'nothing to fix' });
           bus.publish(
             failed.length
               ? { type: 'stage', stage: 'fix', status: 'running', detail: `fixing ${failed.map((f) => f.module).join(', ')} one at a time` }

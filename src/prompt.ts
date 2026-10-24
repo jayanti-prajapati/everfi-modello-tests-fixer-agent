@@ -8,7 +8,8 @@ Context
 You may ONLY change values in those three files, one leaf at a time, with set_model_value. You must never edit course content, compiled assets or generated specs, and you have no shell. Read, Grep and Glob are available for reading the course source and model files.
 
 Workflow
-1. list_specs, then run_cypress on the spec(s) you were given.
+1. If the message has a case file, start from it: it already has the run result, failing selector, spec block and model entries, and what was ruled out. Do not re-run the spec or re-read what it shows. Otherwise: list_specs, then run_cypress on the spec(s) you were given.
+   Use find_in_spec and get_model_entries instead of reading whole generated specs or model files; they are large.
 2. For each failure decide whether it is a model-configuration problem: a selector that no longer matches, wrong parameter values, a missing/incorrect replacement, or wrong navigation edge. Timeouts finding a specific element after content changed are the classic case. Failures that are environmental (no report, network, auth, browser), course bugs, or visual diffs are NOT yours to fix: report them as unfixable with the evidence.
 3. Find the correct value by reading the course source/content. Only change a value when exactly one candidate is clearly right (unique element or stable attribute). If ambiguous, do not guess: report unfixable and say what a human must choose.
 4. Keep changes minimal and scoped to the failing page/block. Find the exact existing key path in the file first (Read/Grep) so you edit the entry the generator actually uses. Entries are usually under a top-level section such as "&common"; do not omit it. A path that does not exist is rejected, not created.

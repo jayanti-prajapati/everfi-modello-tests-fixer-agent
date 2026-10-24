@@ -20,6 +20,7 @@ export const AGENT: Record<AgentStatus, Look> = {
   unfixable: { tone: 'danger', icon: 'alert', label: 'Needs human' },
   error: { tone: 'danger', icon: 'x', label: 'Error' },
   skipped: { tone: 'neutral', icon: 'skip', label: 'Skipped' },
+  flaky: { tone: 'attention', icon: 'alert', label: 'Flaky' },
 };
 
 export const STEP: Record<StepStatus, Look> = {

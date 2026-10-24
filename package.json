@@ -17,7 +17,8 @@
     "orchestrate": "tsx src/orchestrate.ts",
     "ui:dev": "vite ui",
     "ui:build": "vite build ui",
-    "fix-course": "tsx src/fix-course.ts"
+    "fix-course": "tsx src/fix-course.ts",
+    "eval": "tsx test/eval/run.ts"
   },
   "engines": {
     "node": ">=20"
