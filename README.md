@@ -145,6 +145,22 @@ applied: model-parameters.json ["&common","m1/a1/page-2","select_block_by_type(\
 cost: $0.13
 ```
 
+### Skills used at every step
+
+| Step | What you're doing | Skill / subagent |
+|---|---|---|
+| 1. Set up ECC, `yq`, Furnace/SDK symlinks | Prerequisites before anything runs | `ecc-course-dev` |
+| 2. Build the course and generate specs | `ecc --script test:build` (or `test:local`) | `ecc-course-dev`, `modello-tests` |
+| 3. Run a spec and read the failure | `modello run`, JUnit, Cypress screenshots, locating the failing page/block | `modello-tests` |
+| 4. Run the fixer (dry-run, then `--write`) | This tool; rebuild and rerun the spec | `modello-tests` (usage), `ecc-course-dev` (build errors) |
+| 5. Handle what the fixer can't | Manual config changes to `model-*.json` | `modello-tests` |
+| 6. Review the change | `git diff` in the course, or in this repo | `code-review` skill, `reviewer` subagent |
+| 7. Branch, commit, push, PR in the course repo | Only via the skill, after you confirm the text | `course-pr` |
+| 8. Find your way around this codebase | "Where is X / how does Y work" | `researcher` subagent |
+| 9. End the session | Update `docs/progress.md` | `wrap-up` |
+
+The fixer agent itself does not use these skills at runtime; it only has the five `fixer` tools plus read-only Read/Grep/Glob. The skills guide *you* (and Claude Code) around it.
+
 ## 7. Known limitations
 
 - **No page/block context from Cypress.** The failure stack from a real run only contains frames from modello's support code (for example `support/course/legacy-sdk/blocks/modal.js:11`), not the generated spec. The code can map a spec line to its `// -> page: ..., block uid:` comment, but real failures rarely include that line. In practice the agent works from the failing **selector in the error message**, which it searches for in the model files and course source. Failures with no selector in the message are harder.
@@ -187,11 +203,13 @@ Unit tests use fake run/build commands. **They cannot catch real-run bugs** (for
 This project is built and maintained with Claude Code.
 
 - `CLAUDE.md`: project guidance and rules for Claude Code sessions (plan before multi-file changes, don't add dependencies without asking, never commit secrets).
-- `.claude/skills/`:
+- `.claude/skills/` (invoke with `/<skill-name>` or just ask; Claude loads them when the task matches):
   - `ecc-course-dev`: ECC and Furnace setup, building and serving courses.
   - `modello-tests`: generating, running and debugging Modello tests, and using this fixer.
-  - `code-review`, `wrap-up`: review the current diff; end-of-session progress notes.
-- `.claude/agents/`: `reviewer` and `researcher` subagents.
+  - `course-pr`: branch, commit, push and open a PR in a course repo (only sanctioned way to commit there; confirms text first).
+  - `code-review`: review the current diff (Must fix / Should fix / Nit); read-only.
+  - `wrap-up`: end-of-session summary appended to `docs/progress.md`.
+- `.claude/agents/`: `reviewer` (read-only diff review) and `researcher` (read-only "where/how" lookups) subagents.
 - `.claude/settings.json`: shared permissions (read-only git and `ls` allowed; `.env*` reads and `rm -rf` denied).
 - `setup.sh`: one-time bootstrap (git init, initial commit, optional private GitHub repo via `gh`). Don't rerun it casually.
 - `CLAUDE.local.md` (gitignored) is for personal overrides.
