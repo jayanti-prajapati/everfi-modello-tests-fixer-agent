@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { query, type CanUseTool } from '@anthropic-ai/claude-agent-sdk';
+import { query, type CanUseTool, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { type Config } from './config.js';
 import { Session } from './session.js';
 import { SYSTEM_PROMPT } from './prompt.js';
@@ -35,8 +35,20 @@ export interface RunResult {
   finalText?: string;
 }
 
-export async function runFixer(config: Config, specs: string[], log: (s: string) => void = console.log): Promise<RunResult> {
-  const session = new Session(config);
+export interface FixerHooks {
+  /** Use this session (e.g. one with a listener attached) instead of a fresh one. */
+  session?: Session;
+  /** Every raw SDK message, for the orchestrator's event stream. */
+  onMessage?: (msg: SDKMessage) => void;
+}
+
+export async function runFixer(
+  config: Config,
+  specs: string[],
+  log: (s: string) => void = console.log,
+  hooks: FixerHooks = {},
+): Promise<RunResult> {
+  const session = hooks.session ?? new Session(config);
   const prompt =
     `Project: ${config.projectDir}\nModel directory: ${config.modelDir}\nMode: ${config.write ? 'WRITE (changes will be applied)' : 'DRY-RUN (record proposals only)'}\n` +
     `Max Cypress runs: ${config.maxAttempts}\n` +
@@ -60,6 +72,7 @@ export async function runFixer(config: Config, specs: string[], log: (s: string)
       maxBudgetUsd: config.maxBudgetUsd,
     },
   })) {
+    hooks.onMessage?.(msg);
     if (msg.type === 'assistant') {
       for (const block of msg.message.content) {
         if (block.type === 'text' && block.text.trim()) log(block.text.trim());

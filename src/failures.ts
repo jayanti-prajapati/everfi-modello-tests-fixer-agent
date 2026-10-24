@@ -53,6 +53,26 @@ export function parseJUnit(xml: string): FailedTest[] {
   return failures;
 }
 
+export interface TestCaseResult {
+  suite: string;
+  title: string;
+  passed: boolean;
+  message?: string;
+}
+
+/** Every test case in the report, passed or failed (skipped cases count as passed). */
+export function parseJUnitCases(xml: string): TestCaseResult[] {
+  const cases: TestCaseResult[] = [];
+  for (const [, suiteAttrs, body] of xml.matchAll(/<testsuite\b([^>]*)>([\s\S]*?)<\/testsuite>/g)) {
+    const suite = attr(suiteAttrs, 'name') ?? '';
+    for (const [, caseAttrs, caseBody = ''] of body.matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)) {
+      const f = /<failure\b([^>]*?)(?:\/>|>)/.exec(caseBody);
+      cases.push({ suite, title: attr(caseAttrs, 'name') ?? '', passed: !f, message: f ? attr(f[1], 'message') : undefined });
+    }
+  }
+  return cases;
+}
+
 function attr(attrs: string, name: string): string | undefined {
   const m = new RegExp(`\\b${name}="([^"]*)"`).exec(attrs);
   return m ? decode(m[1]) : undefined;

@@ -161,6 +161,52 @@ cost: $0.13
 
 The fixer agent itself does not use these skills at runtime; it only has the five `fixer` tools plus read-only Read/Grep/Glob. The skills guide *you* (and Claude Code) around it.
 
+## 6a. Fix pipeline for a real course (milestone 1)
+
+One local command, end to end, for a real course checkout:
+
+```bash
+npm run ui:build   # once, only needed for --serve
+npm run fix-course -- --project /Users/jay/everfi/git/courses/digital-banking --serve
+```
+
+| Stage | What happens |
+|---|---|
+| Preflight | `ecc`/`yq`/`modello`/`git` present, project is the repo root, tree clean (except local-only `test/ui/config/cypress.config.js`, more with `--allow-dirty`), `git fetch origin develop`. |
+| Branch | `test/modello-fixes-<YYYYMMDD-HHMM>` from `origin/develop`. Deleted again (back to your branch) if nothing gets committed. |
+| Install deps | `yarn install --frozen-lockfile --prefer-offline` (as CI on a fresh checkout). Needed because ECC resolves the course's components through it; a `.pnp.js` left over from another checkout location makes `ecc build` fail with "Could not find ContentPartnerAPI or components". `--skip-install` / `--install-cmd` to change. |
+| Build course | `ecc build --split` (as CI). `--skip-course-build` reuses `public/`. |
+| Generate tests | `ecc --script test:build` (S3 specs, as CI). |
+| Test & fix | One agent per module, `--concurrency` in parallel, each in an isolated copy; only verified fixes merged; checkout rebuilt once. |
+| Final verify | Re-runs each fixed module in the checkout (no model spend). A fix that fails there is reverted. |
+| Report | `runs/<runId>/report.md` and `report.json`: per module result, changes (old -> new), cost, what needs a human. |
+| Commit | Only `test/ui/model-parameters.json`, `model-map.json`, `model-edges.json`. Refuses if any other tracked file changed. |
+| Push | Shows branch, files and message, asks `Push to origin? [y/N]` (`--push` skips the question; no terminal = no push). CI (`build and test`, runs on `test/**`) then verifies the branch. |
+
+You raise the PR (the link is printed) and merge; the tool never does. Exit codes: `0` everything passed or was fixed, `2` some modules need a human, `1` a stage failed. Options: `npm run fix-course -- --help`.
+
+## 6b. Orchestrator and live UI
+
+The orchestrator runs **one fixer agent per module** (one per generated spec), **several in parallel**. Each agent works through the same steps in order: run → diagnose → fix → rebuild → verify → report. Everything is streamed as events to the terminal and to a web UI (orchestration canvas + execution matrix). The default model is Claude Sonnet 4.5 (`claude-sonnet-4-5`) via the Claude Agent SDK.
+
+```bash
+npm run ui:build                                   # once, builds ui/dist
+npm run orchestrate -- --serve --demo              # UI on http://localhost:4317, demo only (no Cypress, no spend)
+npm run orchestrate -- --serve --project /path/to/course --concurrency 2   # UI with live runs enabled
+npm run orchestrate -- --project /path/to/course --concurrency 2            # terminal only
+npm run orchestrate -- --demo                      # scripted run in the terminal
+npm run orchestrate -- --replay runs/<runId>.jsonl # replay a saved run
+npm run ui:dev                                     # Vite dev server on 5173 (proxies /api to 4317)
+```
+
+- **Isolation.** Each agent gets its own copy-on-write copy of the course in a temp folder (no `.git`, no Cypress screenshots/videos, `node_modules` symlinked). This is required because ECC deletes and regenerates `cypress/e2e` on every rebuild, and every agent edits the same model files.
+- **Merge.** With `--write`, only agents that ended `fixed` (verified by a passing rerun) have their leaf patches replayed onto the real checkout, through the same guard. A patch is a `conflict` and is not written when another agent set the same key to a different value or the checkout no longer holds the value the agent started from. The checkout is rebuilt once afterwards. Dry-run never touches the checkout.
+- **Logs.** Every run is saved to `runs/<runId>.jsonl` (gitignored) and can be replayed in the terminal or the UI.
+- **Verified only.** An agent that reports `fixed` without a successful rebuild and a passing rerun after its last change is downgraded to `proposed` and not merged. Each agent's changes merge all-or-nothing; when an agent set the same key twice, its last value is the one merged.
+- **Local only.** The UI server listens on `127.0.0.1` and refuses requests from other hosts or cross-site pages, because `POST /api/runs?mode=live` spends money and, with `--write`, edits the checkout.
+- **Workspace caveats.** `--model-dir` must be relative, and model files that link out of the workspace are refused. `node_modules` is symlinked, not copied, so anything a build writes there is shared with the real checkout. `.git` is not copied, so a build step that reads git metadata behaves differently in a workspace.
+- Extra options: `--concurrency` (default 2), `--shared-workspace` (no copies; only allowed for parallel runs without `--write`, or with `--concurrency 1`), `--keep-workspaces`, `--speed`, `--port`. `--max-budget-usd` is **per agent**.
+
 ## 7. Known limitations
 
 - **No page/block context from Cypress.** The failure stack from a real run only contains frames from modello's support code (for example `support/course/legacy-sdk/blocks/modal.js:11`), not the generated spec. The code can map a spec line to its `// -> page: ..., block uid:` comment, but real failures rarely include that line. In practice the agent works from the failing **selector in the error message**, which it searches for in the model files and course source. Failures with no selector in the message are harder.

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { absModelDir, absSpecDir, fill, type Config } from './config.js';
-import { enrichFailures, parseJUnit } from './failures.js';
+import { enrichFailures, parseJUnit, parseJUnitCases, type TestCaseResult } from './failures.js';
 import { applyPatch, GuardError, resolveModelFile, serializeLike, type Patch } from './guard.js';
 import { runShell } from './shell.js';
 
@@ -15,13 +15,22 @@ export interface Proposal extends Patch {
 
 const SAFE_NAME = /^[\w.-]+$/;
 
+/** Side effects observed by the orchestrator (the CLI does not listen). */
+export type SessionEvent =
+  | { kind: 'run'; spec: string; run: number; status: string; cases: TestCaseResult[] }
+  | { kind: 'patch'; proposal: Proposal }
+  | { kind: 'rebuild'; exitCode: number | null };
+
 /** Mutable state and side effects for one fixer run. All guarded I/O goes through here. */
 export class Session {
   runs = 0;
   proposals: Proposal[] = [];
   outcome?: Outcome;
 
-  constructor(readonly config: Config) {}
+  constructor(
+    readonly config: Config,
+    private readonly listener: (e: SessionEvent) => void = () => {},
+  ) {}
 
   private specPath(spec: string): string {
     if (!SAFE_NAME.test(spec)) throw new GuardError(`invalid spec name "${spec}"`);
@@ -47,10 +56,14 @@ export class Session {
     const cmd = fill(this.config.runCommand, { spec: path.resolve(specPath), report });
     const res = await runShell(cmd, this.config.projectDir);
     if (!fs.existsSync(report)) {
+      this.listener({ kind: 'run', spec, run: this.runs, status: 'no_report', cases: [] });
       return { status: 'no_report', exitCode: res.code, timedOut: res.timedOut, outputTail: res.output };
     }
-    const failures = enrichFailures(parseJUnit(fs.readFileSync(report, 'utf8')), absSpecDir(this.config));
-    return { status: failures.length === 0 && res.code === 0 ? 'passed' : 'failed', exitCode: res.code, failures };
+    const xml = fs.readFileSync(report, 'utf8');
+    const failures = enrichFailures(parseJUnit(xml), absSpecDir(this.config));
+    const status = failures.length === 0 && res.code === 0 ? 'passed' : 'failed';
+    this.listener({ kind: 'run', spec, run: this.runs, status, cases: parseJUnitCases(xml) });
+    return { status, exitCode: res.code, failures };
   }
 
   setValue(patch: Patch) {
@@ -59,7 +72,9 @@ export class Session {
     const result = applyPatch(JSON.parse(original), patch);
     const applied = this.config.write;
     if (applied) fs.writeFileSync(file, serializeLike(original, result.json));
-    this.proposals.push({ ...patch, before: result.before, applied });
+    const proposal: Proposal = { ...patch, before: result.before, applied };
+    this.proposals.push(proposal);
+    this.listener({ kind: 'patch', proposal });
     return { ...patch, before: result.before, created: result.created, applied };
   }
 
@@ -67,6 +82,7 @@ export class Session {
   async rebuild() {
     if (!this.config.write) throw new GuardError('rebuild is disabled in dry-run mode');
     const res = await runShell(this.config.buildCommand, this.config.projectDir);
+    this.listener({ kind: 'rebuild', exitCode: res.code });
     return { exitCode: res.code, outputTail: res.output, specsAfterBuild: this.listSpecs() };
   }
 }
