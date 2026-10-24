@@ -26,6 +26,8 @@ export class Session {
   runs = 0;
   proposals: Proposal[] = [];
   outcome?: Outcome;
+  /** Results already collected for a spec (orchestrator test phase); served once instead of re-running */
+  private seeded = new Map<string, unknown>();
 
   constructor(
     readonly config: Config,
@@ -44,7 +46,21 @@ export class Session {
     return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.js')).sort() : [];
   }
 
+  /** The next runSpec(spec) returns `result` without running Cypress or counting an attempt. */
+  seed(spec: string, result: unknown): void {
+    this.seeded.set(spec, result);
+  }
+
   async runSpec(spec: string) {
+    if (this.seeded.has(spec)) {
+      const result = this.seeded.get(spec);
+      this.seeded.delete(spec);
+      return result as Awaited<ReturnType<Session['runSpecNow']>>;
+    }
+    return this.runSpecNow(spec);
+  }
+
+  private async runSpecNow(spec: string) {
     if (this.runs >= this.config.maxAttempts) {
       throw new GuardError(`attempt limit reached (${this.config.maxAttempts} runs); stop and report`);
     }

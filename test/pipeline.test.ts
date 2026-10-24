@@ -13,6 +13,8 @@ import { runPipeline, type PushRequest } from '../src/pipeline/index.js';
 
 // Only the Claude call is faked: each "agent" drives its real Session in its workspace.
 const fakePatches: Record<string, Omit<Patch, 'file'>> = {};
+/** Specs whose module breaks again in the checkout right after the agent verified its fix */
+const breakAfterFix = new Set<string>();
 vi.mock('../src/agent.js', () => ({
   runFixer: async (config: Config, specs: string[], _log: unknown, hooks: FixerHooks) => {
     const s = hooks.session!;
@@ -23,6 +25,7 @@ vi.mock('../src/agent.js', () => ({
       s.setValue({ file: 'model-parameters.json', ...p });
       await s.rebuild();
       await s.runSpec(spec);
+      if (breakAfterFix.has(spec)) fs.writeFileSync(path.join(config.projectDir, 'FAIL_IN_CHECKOUT'), '');
     }
     s.outcome = { status: p ? 'fixed' : 'proposed', summary: p ? `fixed ${spec}` : `${spec} passed` };
     return { session: s, costUsd: 0.01 };
@@ -44,6 +47,7 @@ const paramsIn = (dir: string) => JSON.parse(fs.readFileSync(path.join(dir, 'tes
 
 beforeEach(() => {
   for (const k of Object.keys(fakePatches)) delete fakePatches[k];
+  breakAfterFix.clear();
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pipe-')));
   origin = path.join(root, 'origin.git');
   const seed = path.join(root, 'seed');
@@ -62,20 +66,19 @@ beforeEach(() => {
   sh(seed, 'push', '-q', 'origin', 'develop');
   execFileSync('git', ['clone', '-q', origin, course]);
   for (const [k, v] of [['user.name', 'T'], ['user.email', 't@example.com']]) sh(course, 'config', k, v);
-  // Fake ECC test build: (re)generates the specs. Fake modello run: passes, except in the
-  // checkout itself when FAIL_IN_CHECKOUT exists (to exercise the final verify).
+  // Fake ECC test build: (re)generates the specs. The fake modello run is test/helpers/fake-run.cjs.
   write(root, 'gen.cjs', `const fs=require('fs');fs.mkdirSync('test/ui/cypress/e2e',{recursive:true});for(const s of ${JSON.stringify(SPECS)})fs.writeFileSync('test/ui/cypress/e2e/'+s,'// spec');`);
-  write(
-    root,
-    'run.cjs',
-    `const fs=require('fs');const fail=fs.realpathSync(process.cwd())===${JSON.stringify(course)}&&fs.existsSync('FAIL_IN_CHECKOUT');` +
-      `fs.writeFileSync(process.argv[2],'<testsuites><testsuite name="s"><testcase name="page 1">'+(fail?'<failure message="boom"/>':'')+'</testcase></testsuite></testsuites>');`,
-  );
 });
 
 const pushes: PushRequest[] = [];
 async function run(over: { confirm?: boolean; maxTotalUsd?: number; concurrency?: number } = {}) {
   pushes.length = 0;
+  // Every module with a fake patch starts broken: its spec fails until the value changes.
+  const broken: Record<string, [string[], unknown]> = {};
+  for (const [spec, p] of Object.entries(fakePatches)) {
+    broken[/-(m\d+)-/.exec(spec)![1]] = [p.path, p.path.reduce<unknown>((v, k) => (v as Record<string, unknown>)?.[k], PARAMS)];
+  }
+  fs.writeFileSync(path.join(root, 'broken.json'), JSON.stringify(broken));
   const bus = new Bus();
   const config: Config = {
     ...DEFAULTS,
@@ -83,7 +86,7 @@ async function run(over: { confirm?: boolean; maxTotalUsd?: number; concurrency?
     write: true,
     local: false,
     buildCommand: `node ${path.join(root, 'gen.cjs')}`,
-    runCommand: `node ${path.join(root, 'run.cjs')} {report}`,
+    runCommand: `node ${path.join(__dirname, 'helpers', 'fake-run.cjs')} {report} {spec} ${path.join(root, 'broken.json')}`,
   };
   const result = await runPipeline({
     config,
@@ -113,7 +116,7 @@ describe('fix-course pipeline', () => {
     const { ok, report, reportFile, state } = await run();
 
     expect(ok).toBe(true);
-    expect(report.branch).toMatch(/^test\/modello-fixes-\d{8}-\d{4}$/);
+    expect(report.branch).toMatch(/^test\/modello-fixes-\d{8}-\d{6}$/);
     expect(sh(course, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(report.branch);
     expect(report.committedFiles).toEqual(['test/ui/model-parameters.json']);
     expect(paramsIn(course)['&common'].p1.b.selector).toBe('#new1');
@@ -127,7 +130,6 @@ describe('fix-course pipeline', () => {
     expect(fs.readFileSync(reportFile, 'utf8')).toContain('fixed and verified');
     expect(state.pipeline?.status).toBe('ok');
     expect(Object.values(state.pipeline!.stages).every((s) => s.status === 'done')).toBe(true);
-    expect(fs.readdirSync(path.join(root, 'ws'))).toEqual([]);
   });
 
   it('commits but does not push without confirmation', async () => {
@@ -161,7 +163,7 @@ describe('fix-course pipeline', () => {
 
   it('reverts a fix that fails again in the checkout and commits nothing', async () => {
     fakePatches['c-m1-s3.js'] = { path: ['&common', 'p1', 'b', 'selector'], value: '#new1' };
-    write(course, 'FAIL_IN_CHECKOUT', '');
+    breakAfterFix.add('c-m1-s3.js');
     const { ok, report } = await run();
     expect(ok).toBe(true);
     expect(report.verify[0]).toMatchObject({ agentId: 'm1', passed: false, reverted: [['&common', 'p1', 'b', 'selector']] });
@@ -192,8 +194,41 @@ describe('fix-course pipeline', () => {
   });
 
   it('stops starting agents once the total budget is spent', async () => {
+    fakePatches['c-m1-s3.js'] = { path: ['&common', 'p1', 'b', 'selector'], value: '#new1' };
+    fakePatches['c-m2-s3.js'] = { path: ['&common', 'p2', 'b', 'selector'], value: '#new2' };
     const { report } = await run({ maxTotalUsd: 0.005, concurrency: 1 });
-    expect(report.agents.map((a) => a.status)).toEqual(['passed', 'skipped']);
+    expect(report.agents.map((a) => a.status)).toEqual(['fixed', 'skipped']);
+  });
+});
+
+describe('fix branches', () => {
+  it('removes a leftover empty fix branch it starts on and returns to develop', async () => {
+    sh(course, 'switch', '-q', '-c', 'test/modello-fixes-20260101-000000', 'origin/develop');
+    const { ok, report } = await run(); // nothing to fix
+    expect(ok).toBe(true);
+    expect(report.originalBranch).toBe('develop');
+    expect(sh(course, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('develop');
+    expect(sh(course, 'branch', '--format=%(refname:short)')).toBe('develop');
+  });
+
+  it('picks a new name when the branch already exists with work on it', async () => {
+    fakePatches['c-m1-s3.js'] = { path: ['&common', 'p1', 'b', 'selector'], value: '#new1' };
+    const first = await run({ confirm: false });
+    sh(course, 'switch', '-q', 'develop');
+    sh(course, 'branch', '-q', '-m', first.report.branch!, 'test/modello-fixes-keep');
+    sh(course, 'branch', '-q', 'test/modello-fixes-keep-copy', 'test/modello-fixes-keep');
+    // Same timestamp for both names: the second run must not collide with a branch that has a commit.
+    const { uniqueBranchName } = await import('../src/pipeline/git.js');
+    expect(await uniqueBranchName(course, 'test/modello-fixes-keep')).toBe('test/modello-fixes-keep-2');
+  });
+
+  it('restores the original branch after an interrupt when nothing was committed', async () => {
+    const { activeRun, restoreAfterInterrupt } = await import('../src/pipeline/index.js');
+    sh(course, 'switch', '-q', '-c', 'test/modello-fixes-x', 'origin/develop');
+    activeRun.set(course, { original: 'develop', branch: 'test/modello-fixes-x', allowDirty: [], committed: false });
+    expect(restoreAfterInterrupt()[0]).toMatch(/back on develop/);
+    expect(sh(course, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('develop');
+    expect(sh(course, 'branch', '--format=%(refname:short)')).toBe('develop');
   });
 });
 

@@ -16,7 +16,9 @@ const SKIP = [/^\.git$/, /(^|\/)cypress\/(screenshots|videos)$/];
 export function createWorkspace(sourceDir: string, root: string, name: string): string {
   const src = path.resolve(sourceDir);
   fs.mkdirSync(root, { recursive: true });
-  const dest = fs.mkdtempSync(path.join(root, `${name.replace(/[^\w.-]/g, '_')}-`));
+  // realpath: on macOS the temp dir is under /var, a link to /private/var. Cypress resolves the
+  // project to /private/var/... and then matches no spec given as /var/...
+  const dest = fs.realpathSync(fs.mkdtempSync(path.join(root, `${name.replace(/[^\w.-]/g, '_')}-`)));
   try {
     fs.cpSync(src, dest, {
       recursive: true,

@@ -30,7 +30,7 @@ export interface PipelineReport {
 }
 
 const STATUS_NOTE: Record<string, string> = {
-  passed: 'passed, no change needed',
+  passed: 'passed, no agent needed',
   fixed: 'fixed and verified',
   proposed: 'change proposed, not verified (not committed)',
   unfixable: 'needs a human',
@@ -38,11 +38,15 @@ const STATUS_NOTE: Record<string, string> = {
   skipped: 'not run (budget)',
 };
 
-/** Modules whose fix made it into the checkout and survived the final verify. */
+/** Agents whose change is in the checkout and was verified by their own rebuild + passing rerun. */
+export function verifiedFixes(r: PipelineReport): AgentSummary[] {
+  return r.agents.filter((a) => a.status === 'fixed' && a.patches.some((p) => p.applied));
+}
+
+/** Verified fixes that also passed the final verify (all fixes together). */
 export function committedModules(r: PipelineReport): AgentSummary[] {
-  const applied = new Set(r.merge.filter((m) => m.status === 'applied').map((m) => m.agentId));
   const failed = new Set(r.verify.filter((v) => !v.passed).map((v) => v.agentId));
-  return r.agents.filter((a) => applied.has(a.agentId) && !failed.has(a.agentId));
+  return verifiedFixes(r).filter((a) => !failed.has(a.agentId));
 }
 
 const fmt = (p: { file: string; path: string[]; before: unknown; value: unknown }) =>
@@ -63,8 +67,8 @@ export function commitMessage(r: PipelineReport): string {
   }
   lines.push(
     '',
-    'Verified: each module passed after a rebuild in an isolated copy, and',
-    `again in this checkout after the merged rebuild (S3, ${r.startedAt.slice(0, 10)}).`,
+    'Verified: each fix passed a rebuild and rerun in this checkout, and all',
+    `fixed modules passed again together before commit (S3, ${r.startedAt.slice(0, 10)}).`,
   );
   const open = r.agents.filter((a) => a.status !== 'passed' && !mods.includes(a));
   if (open.length) lines.push(`Not fixed here: ${open.map((a) => `${a.module} (${a.status})`).join(', ')}.`);

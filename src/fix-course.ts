@@ -7,7 +7,7 @@ import { DEFAULTS, type Config } from './config.js';
 import { Bus } from './orchestrator/bus.js';
 import { printEvent } from './orchestrator/print.js';
 import { activeWorkspaces, removeWorkspace } from './orchestrator/workspace.js';
-import { LOCAL_ONLY, runPipeline, type PushRequest } from './pipeline/index.js';
+import { LOCAL_ONLY, restoreAfterInterrupt, runPipeline, type PushRequest } from './pipeline/index.js';
 import { startServer } from './server/index.js';
 
 const MODEL = 'claude-sonnet-4-5';
@@ -103,9 +103,11 @@ if (values.serve) {
 }
 
 // Ctrl-C: remove the isolated copies; the branch is left as is and reported.
+// Ctrl-C: remove the isolated copies and put the checkout back on your branch when nothing was committed.
 process.once('SIGINT', () => {
   for (const ws of activeWorkspaces) removeWorkspace(ws);
-  console.error('\nInterrupted. Workspaces removed. The course checkout may be on the fix branch; check `git status` there.');
+  const notes = restoreAfterInterrupt();
+  console.error(`\nInterrupted. Workspaces removed.${notes.length ? `\n${notes.join('\n')}` : ''}`);
   process.exit(130);
 });
 

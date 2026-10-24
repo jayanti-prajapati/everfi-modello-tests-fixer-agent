@@ -2,6 +2,7 @@
 // preflight -> branch -> build course -> generate tests -> test + fix (parallel agents)
 // -> final verify -> report -> commit (test generator files only) -> push (after confirmation).
 // A human raises the PR and merges.
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { absModelDir, type Config } from '../config.js';
@@ -15,7 +16,41 @@ import { preflight } from '../preflight.js';
 import { Session } from '../session.js';
 import { runShell } from '../shell.js';
 import * as G from './git.js';
-import { commitMessage, committedModules, renderReport, type PipelineReport, type VerifyResult } from './report.js';
+import { commitMessage, committedModules, renderReport, verifiedFixes, type PipelineReport, type VerifyResult } from './report.js';
+
+/** Branch state of a pipeline in progress, so a Ctrl-C handler can put the checkout back. */
+export const activeRun = new Map<string, { original: string; branch: string; allowDirty: string[]; committed: boolean }>();
+
+/**
+ * For an interrupted run (sync, for a signal handler): if nothing was committed and only allowed
+ * local-only files are dirty, switch back to the original branch and delete the fix branch.
+ * Returns a message describing what happened.
+ */
+export function restoreAfterInterrupt(): string[] {
+  const notes: string[] = [];
+  for (const [cwd, r] of activeRun) {
+    if (r.committed) {
+      notes.push(`${cwd}: left on ${r.branch} (it has a commit).`);
+      continue;
+    }
+    try {
+      const dirty = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=no'], { cwd, encoding: 'utf8' })
+        .split('\n')
+        .map((l) => l.slice(3).trim())
+        .filter((p) => p && !r.allowDirty.includes(p));
+      if (dirty.length) {
+        notes.push(`${cwd}: left on ${r.branch}; uncommitted changes in ${dirty.join(', ')}.`);
+        continue;
+      }
+      G.abandonBranchSync(cwd, r.original, r.branch);
+      notes.push(`${cwd}: back on ${r.original}; deleted ${r.branch}.`);
+    } catch (e) {
+      notes.push(`${cwd}: could not restore ${r.original} (${e instanceof Error ? e.message : e}); you are on ${r.branch}.`);
+    }
+  }
+  activeRun.clear();
+  return notes;
+}
 
 /** Edits developers keep locally and that must never block a run or be committed. */
 export const LOCAL_ONLY = ['test/ui/config/cypress.config.js'];
@@ -130,10 +165,29 @@ export async function runPipeline(o: PipelineOptions): Promise<PipelineResult> {
     }, (b) => `clean tree, fetched ${b}`);
 
     // 1. Branch from the fresh base. CI's build-and-test runs on pushes to test/**.
-    const stamp = now().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 13);
-    const branch = `${o.branchPrefix ?? 'test/modello-fixes-'}${stamp}`;
-    report.originalBranch = await G.currentBranch(cwd);
-    await stage('branch', () => G.createBranch(cwd, branch, base), () => `${branch} from ${base}`);
+    const prefix = o.branchPrefix ?? 'test/modello-fixes-';
+    let branch = '';
+    await stage('branch', async () => {
+      // Empty, never-pushed fix branches are leftovers of interrupted runs: remove them, and
+      // never treat one as "your" branch to return to.
+      let current = await G.currentBranch(cwd);
+      for (const b of await G.listBranches(cwd, prefix)) {
+        if (!(await G.isEmptyLocalBranch(cwd, b, base, remote))) continue;
+        if (b === current) {
+          const fallback = (await G.branchExists(cwd, baseBranch)) ? baseBranch : undefined;
+          if (!fallback) continue; // nowhere sensible to go; leave it
+          await G.git(cwd, ['switch', fallback]);
+          current = fallback;
+        }
+        await G.git(cwd, ['branch', '-D', b]);
+        bus.publish({ type: 'log', level: 'info', message: `Removed leftover empty branch ${b}` });
+      }
+      report.originalBranch = current;
+      const stamp = now().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+      branch = await G.uniqueBranchName(cwd, `${prefix}${stamp}`);
+      await G.createBranch(cwd, branch, base);
+      activeRun.set(cwd, { original: current, branch, allowDirty, committed: false });
+    }, () => `${branch} from ${base}`);
     report.branch = branch;
 
     // 2. Install dependencies from the committed lockfile, as CI does. ECC resolves the course's
@@ -161,19 +215,45 @@ export async function runPipeline(o: PipelineOptions): Promise<PipelineResult> {
       return list;
     }, (l) => `${l.length} specs`);
 
-    // 4. Run every module's spec and fix in parallel (isolated copies, verified-only merge + one rebuild).
-    const result = await stage('fix', () =>
-      orchestrate({ config, specs: specs!, concurrency: o.concurrency, isolate: true, workspaceRoot: o.workspaceRoot, maxTotalUsd: o.maxTotalUsd, bus }),
-      (r) => `${r.agents.map((a) => `${a.module} ${a.status}`).join(', ')}`,
-    );
-    report.agents = result!.agents;
-    report.merge = result!.merge;
+    // 5/6. In the real course folder: run every spec in parallel and collect results ("test"),
+    //      then fix the failing modules one agent at a time ("fix") so writes never overlap.
+    bus.publish({ type: 'stage', stage: 'test', status: 'running' });
+    let tested = false;
+    let result;
+    try {
+      result = await orchestrate({
+        config,
+        specs: specs!,
+        concurrency: o.concurrency,
+        isolate: false,
+        maxTotalUsd: o.maxTotalUsd,
+        bus,
+        onTested: (failed) => {
+          tested = true;
+          bus.publish({ type: 'stage', stage: 'test', status: 'done', detail: `${specs!.length - failed.length}/${specs!.length} passed` });
+          bus.publish(
+            failed.length
+              ? { type: 'stage', stage: 'fix', status: 'running', detail: `fixing ${failed.map((f) => f.module).join(', ')} one at a time` }
+              : { type: 'stage', stage: 'fix', status: 'skipped', detail: 'all specs passed' },
+          );
+        },
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      bus.publish({ type: 'stage', stage: tested ? 'fix' : 'test', status: 'failed', detail: msg });
+      throw new StageError(`${tested ? 'fix' : 'test'}: ${msg}`);
+    }
+    report.agents = result.agents;
+    report.merge = result.merge;
     report.costUsd = report.agents.reduce((s, a) => s + (a.costUsd ?? 0), 0);
+    if (report.agents.some((a) => a.status !== 'passed')) {
+      bus.publish({ type: 'stage', stage: 'fix', status: 'done', detail: report.agents.filter((a) => a.status !== 'passed').map((a) => `${a.module} ${a.status}`).join(', ') });
+    }
 
-    // 5. Re-run each fixed module in the real checkout (no model spend); revert fixes that fail here.
+    // 7. Re-run all fixed modules together in the checkout (no model spend); revert fixes that fail now.
     await stage('verify', async () => {
-      const fixed = report.agents.filter((a) => report.merge.some((m) => m.agentId === a.agentId && m.status === 'applied'));
-      if (fixed.length === 0) return { skipped: 'nothing merged' };
+      const fixed = verifiedFixes(report);
+      if (fixed.length === 0) return { skipped: 'nothing fixed' };
       report.verify = await runPool(fixed, o.concurrency, async (a): Promise<VerifyResult> => {
         const res = await new Session({ ...config, maxAttempts: 1 }).runSpec(a.spec);
         const passed = res.status === 'passed';
@@ -194,6 +274,7 @@ export async function runPipeline(o: PipelineOptions): Promise<PipelineResult> {
       const sha = await G.commitPaths(cwd, branch, modelPaths, allowDirty, commitMessage(report));
       if (!sha) throw new Error('fixes were merged but no model file differs from the base');
       report.commit = sha;
+      activeRun.get(cwd)!.committed = true;
       report.committedFiles = await G.filesInCommit(cwd, sha);
       return sha;
     };
@@ -218,6 +299,7 @@ export async function runPipeline(o: PipelineOptions): Promise<PipelineResult> {
     await leaveCleanly(cwd, report, allowDirty, bus);
   } finally {
     report.finishedAt = now().toISOString();
+    activeRun.delete(cwd);
   }
   const reportFile = writeReport(o.reportRoot, report);
   bus.publish({

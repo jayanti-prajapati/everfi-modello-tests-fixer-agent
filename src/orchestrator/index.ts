@@ -8,7 +8,7 @@ import { runShell } from '../shell.js';
 import { SERVER_NAME } from '../tools/index.js';
 import type { Bus } from './bus.js';
 import type { AgentPlan, AgentStatus, MergeResult, StepId, StepStatus, TestCase } from './events.js';
-import { mergeProposals, type AgentPatches } from './merger.js';
+import { mergeProposals, revertPatches, type AgentPatches } from './merger.js';
 import { runPool } from './scheduler.js';
 import { assertInside, createWorkspace, removeWorkspace } from './workspace.js';
 
@@ -16,9 +16,16 @@ export interface OrchestrateOptions {
   config: Config;
   /** Spec file names; empty = every spec in the checkout */
   specs: string[];
+  /** Specs tested at the same time (real course) or agents at the same time (isolate) */
   concurrency: number;
-  /** Give each agent its own copy of the course (required for parallel --write) */
+  /**
+   * false (default for the CLIs): work in the real course folder. All specs are tested in
+   * parallel first, then failing modules are fixed by one agent at a time, so writes and
+   * rebuilds never overlap. true: each agent gets a private copy and fixes are merged back.
+   */
   isolate: boolean;
+  /** Called after the test phase (real course mode) with the modules that failed */
+  onTested?: (failed: AgentPlan[]) => void;
   keepWorkspaces?: boolean;
   workspaceRoot?: string;
   /** Stop starting new agents once finished agents have spent this much (USD) */
@@ -55,9 +62,6 @@ export function planAgents(specs: string[]): AgentPlan[] {
 /** Runs one fixer agent per spec, up to `concurrency` at a time; each agent works through its steps in order. */
 export async function orchestrate(o: OrchestrateOptions): Promise<OrchestrateResult> {
   const { config, bus } = o;
-  if (config.write && !o.isolate && o.concurrency > 1) {
-    throw new Error('Parallel --write needs isolated workspaces: agents would rebuild and edit the same checkout.');
-  }
   if (o.isolate && path.isAbsolute(config.modelDir)) {
     throw new Error('--model-dir must be relative to the project when agents run in isolated workspaces.');
   }
@@ -76,6 +80,10 @@ export async function orchestrate(o: OrchestrateOptions): Promise<OrchestrateRes
   const root = o.workspaceRoot ?? path.join(os.tmpdir(), 'modello-orchestrator');
   let costUsd = 0;
   try {
+    if (!o.isolate) {
+      const summaries = await testThenFix(agents, o, () => costUsd, (c) => (costUsd += c));
+      return { agents: summaries, merge: [] };
+    }
     const summaries = await runPool(agents, o.concurrency, (plan) => {
       if (o.maxTotalUsd !== undefined && costUsd >= o.maxTotalUsd) {
         const summary = `Not started: total budget $${o.maxTotalUsd} reached ($${costUsd.toFixed(2)} spent).`;
@@ -93,6 +101,76 @@ export async function orchestrate(o: OrchestrateOptions): Promise<OrchestrateRes
     // Always close the run, so the UI never stays on "running" after a failure.
     bus.publish({ type: 'run.finished', costUsd });
   }
+}
+
+type RunResult = Awaited<ReturnType<Session['runSpec']>>;
+
+/**
+ * Real course mode. Phase 1: run every spec in the checkout, `concurrency` at a time (plain
+ * Cypress, no agent, no spend). Phase 2: for each failing module, one agent at a time diagnoses,
+ * changes a value, rebuilds and verifies; the agent starts from the phase 1 result. A change
+ * that does not end verified is reverted (and specs rebuilt) before the next agent starts.
+ */
+async function testThenFix(
+  agents: AgentPlan[],
+  o: OrchestrateOptions,
+  spent: () => number,
+  addCost: (c: number) => void,
+): Promise<AgentSummary[]> {
+  const { bus, config } = o;
+  const tested = await runPool(agents, o.concurrency, async (plan) => {
+    const id = plan.agentId;
+    bus.publish({ type: 'agent.started', agentId: id });
+    bus.publish({ type: 'step', agentId: id, step: 'run', status: 'running' });
+    const session = new Session({ ...config, maxAttempts: 1 }, (e) => {
+      if (e.kind === 'run') bus.publish({ type: 'cases', agentId: id, run: 1, cases: toCases(e.cases, e.status) });
+    });
+    let result: RunResult | undefined;
+    try {
+      result = await session.runSpec(plan.spec);
+    } catch (e) {
+      bus.publish({ type: 'log', level: 'error', message: `${id}: could not run ${plan.spec}: ${e instanceof Error ? e.message : e}` });
+    }
+    const passed = result?.status === 'passed';
+    bus.publish({ type: 'step', agentId: id, step: 'run', status: passed ? 'done' : 'failed' });
+    if (passed) {
+      for (const step of ['diagnose', 'fix', 'rebuild', 'verify'] as const) bus.publish({ type: 'step', agentId: id, step, status: 'skipped' });
+      bus.publish({ type: 'step', agentId: id, step: 'report', status: 'done' });
+      bus.publish({ type: 'agent.finished', agentId: id, status: 'passed', summary: 'Spec passed; no agent needed.', costUsd: 0 });
+    }
+    return { plan, result, passed };
+  });
+
+  const failed = tested.filter((t) => !t.passed);
+  o.onTested?.(failed.map((t) => t.plan));
+  const byId = new Map<string, AgentSummary>();
+  for (const t of tested) if (t.passed) byId.set(t.plan.agentId, { ...t.plan, status: 'passed', summary: 'Spec passed; no agent needed.', costUsd: 0, patches: [] });
+
+  // One agent at a time: each one's writes and rebuild finish before the next one starts.
+  for (const t of failed) {
+    if (o.maxTotalUsd !== undefined && spent() >= o.maxTotalUsd) {
+      const summary = `Not started: total budget $${o.maxTotalUsd} reached ($${spent().toFixed(2)} spent).`;
+      bus.publish({ type: 'agent.finished', agentId: t.plan.agentId, status: 'skipped', summary });
+      byId.set(t.plan.agentId, { ...t.plan, status: 'skipped', summary, patches: [] });
+      continue;
+    }
+    const a = await runAgent(t.plan, o, '', t.result);
+    addCost(a.costUsd ?? 0);
+    if (config.write && a.status !== 'fixed') await revertUnverified(a, o);
+    byId.set(t.plan.agentId, a);
+  }
+  return agents.map((p) => byId.get(p.agentId)!);
+}
+
+/** Real course mode: an agent's applied change that did not end verified must not stay in the checkout. */
+async function revertUnverified(a: AgentSummary, { config, bus }: OrchestrateOptions): Promise<void> {
+  const applied = a.patches.filter((p) => p.applied);
+  if (applied.length === 0) return;
+  const reverted = revertPatches(absModelDir(config), applied);
+  if (reverted.length === 0) return;
+  bus.publish({ type: 'log', level: 'warn', message: `${a.agentId}: reverted ${reverted.length} unverified change(s); rebuilding specs.` });
+  const res = await runShell(config.buildCommand, config.projectDir);
+  if (res.code !== 0) bus.publish({ type: 'log', level: 'error', message: `Rebuild after revert failed (exit ${res.code}).` });
 }
 
 async function mergeBack({ config, bus }: OrchestrateOptions, summaries: AgentSummary[]): Promise<MergeResult[]> {
@@ -114,7 +192,8 @@ async function mergeBack({ config, bus }: OrchestrateOptions, summaries: AgentSu
   return results;
 }
 
-async function runAgent(plan: AgentPlan, o: OrchestrateOptions, root: string): Promise<AgentSummary> {
+/** `firstResult`: real course mode passes the test-phase result, so the agent does not re-run the spec. */
+async function runAgent(plan: AgentPlan, o: OrchestrateOptions, root: string, firstResult?: RunResult): Promise<AgentSummary> {
   const { bus } = o;
   const id = plan.agentId;
   let workspace: string | undefined;
@@ -124,12 +203,18 @@ async function runAgent(plan: AgentPlan, o: OrchestrateOptions, root: string): P
     workspace = o.isolate ? createWorkspace(o.config.projectDir, root, id) : o.config.projectDir;
     const config: Config = { ...o.config, projectDir: workspace };
     if (o.isolate) assertInside(workspace, absModelDir(config));
-    bus.publish({ type: 'agent.started', agentId: id, workspace: o.isolate ? workspace : undefined });
-    steps.set('run', 'running');
+    if (firstResult) {
+      // Started in the test phase already: carry on from its result.
+      steps.set('run', 'done');
+      steps.set('diagnose', 'running');
+    } else {
+      bus.publish({ type: 'agent.started', agentId: id, workspace: o.isolate ? workspace : undefined });
+      steps.set('run', 'running');
+    }
 
     // What the runs showed, independent of what the agent reports: a fix counts as verified
     // only if a successful rebuild and then a passing run came after the last patch.
-    let firstRun: 'passed' | 'failed' | undefined;
+    let firstRun: 'passed' | 'failed' | undefined = firstResult ? (firstResult.status === 'passed' ? 'passed' : 'failed') : undefined;
     let rebuiltSincePatch = false;
     let verified = false;
     const session = new Session(config, (e: SessionEvent) => {
@@ -150,6 +235,7 @@ async function runAgent(plan: AgentPlan, o: OrchestrateOptions, root: string): P
       }
     });
     patches = session.proposals;
+    if (firstResult) session.seed(plan.spec, firstResult);
 
     let inputTokens = 0;
     let outputTokens = 0;
@@ -184,7 +270,7 @@ async function runAgent(plan: AgentPlan, o: OrchestrateOptions, root: string): P
     if (status === 'fixed' && !verified) {
       // Never merge a fix the runs did not confirm.
       status = 'proposed';
-      summary += ' [Orchestrator: not verified by a rebuild and passing run after the last change; not merged.]';
+      summary += ' [Orchestrator: not verified by a rebuild and passing run after the last change; not kept.]';
     }
     steps.finish(status !== 'error');
     bus.publish({ type: 'agent.finished', agentId: id, status, summary, costUsd: result.costUsd });

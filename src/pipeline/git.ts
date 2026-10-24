@@ -1,6 +1,6 @@
 // Git operations for the fix pipeline. Every call uses an argument array (no shell), and the
 // commit step only ever stages an explicit allowlist of paths.
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { childEnv } from '../shell.js';
 
 export class GitError extends Error {}
@@ -61,7 +61,40 @@ export async function fetchBase(cwd: string, remote: string, branch: string): Pr
 export async function createBranch(cwd: string, name: string, base: string): Promise<void> {
   if (!/^[\w./-]+$/.test(name) || name.includes('..')) throw new GitError(`invalid branch name "${name}"`);
   if (await branchExists(cwd, name)) throw new GitError(`branch ${name} already exists`);
-  await git(cwd, ['switch', '-c', name, base]);
+  // --no-track: the fix branch must not follow develop; `push -u` sets its own upstream.
+  await git(cwd, ['switch', '--no-track', '-c', name, base]);
+}
+
+export async function listBranches(cwd: string, prefix: string): Promise<string[]> {
+  const out = await git(cwd, ['branch', '--list', `${prefix}*`, '--format=%(refname:short)']);
+  return out.split('\n').map((l) => l.trim()).filter(Boolean);
+}
+
+/**
+ * True when `branch` has no commits beyond `base` and does not exist on `remote`. (An upstream
+ * alone proves nothing: `git switch -c x origin/develop` tracks develop.)
+ */
+export async function isEmptyLocalBranch(cwd: string, branch: string, base: string, remote = 'origin'): Promise<boolean> {
+  const ahead = Number((await git(cwd, ['rev-list', '--count', `${base}..${branch}`])).trim());
+  const pushed = await git(cwd, ['rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${branch}`]).then(
+    () => true,
+    () => false,
+  );
+  return ahead === 0 && !pushed;
+}
+
+/** `name`, or `name-2`, `name-3`, ... if it already exists. */
+export async function uniqueBranchName(cwd: string, name: string): Promise<string> {
+  let candidate = name;
+  for (let n = 2; await branchExists(cwd, candidate); n++) candidate = `${name}-${n}`;
+  return candidate;
+}
+
+/** Synchronous variant of abandonBranch for a Ctrl-C handler (no event loop left to await on). */
+export function abandonBranchSync(cwd: string, original: string, branch: string): void {
+  const opts = { cwd, env: childEnv(), stdio: 'ignore' as const };
+  execFileSync('git', ['switch', original], opts);
+  execFileSync('git', ['branch', '-D', branch], opts);
 }
 
 /** Switches back to `original` and deletes `branch` (used when there is nothing to commit). */

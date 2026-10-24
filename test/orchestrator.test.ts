@@ -21,10 +21,15 @@ import { childEnv } from '../src/shell.js';
 const fakePatches: Record<string, Omit<Patch, 'file'> & { file?: Patch['file'] }> = {};
 /** Specs whose fake agent claims "fixed" without rebuilding or rerunning */
 const claimsOnly = new Set<string>();
+/** What the fake agents did: which specs, how many ran at once, attempts counted at their first run */
+const agentLog = { calls: [] as string[], active: 0, peak: 0, runsAfterFirst: [] as number[] };
 vi.mock('../src/agent.js', () => ({
   runFixer: async (config: Config, specs: string[], _log: unknown, hooks: FixerHooks) => {
     const s = hooks.session!;
     const spec = specs[0];
+    agentLog.calls.push(spec);
+    agentLog.peak = Math.max(agentLog.peak, ++agentLog.active);
+    await new Promise((r) => setTimeout(r, 5));
     const tool = (name: string, input: object) =>
       hooks.onMessage?.({
         type: 'assistant',
@@ -32,6 +37,7 @@ vi.mock('../src/agent.js', () => ({
       } as never);
     tool('run_cypress', { spec });
     await s.runSpec(spec);
+    agentLog.runsAfterFirst.push(s.runs);
     const p = fakePatches[spec];
     if (p) {
       tool('set_model_value', p);
@@ -45,22 +51,24 @@ vi.mock('../src/agent.js', () => ({
     }
     tool('report_outcome', {});
     s.outcome = { status: config.write ? 'fixed' : 'proposed', summary: `done ${spec}` };
+    agentLog.active--;
     return { session: s, costUsd: 0.01 };
   },
 }));
 
-const PASSING = `node -e "require('fs').writeFileSync(process.argv[1], '<testsuites><testsuite name=\\\\'s\\\\'><testcase name=\\\\'page 1\\\\'/></testsuite></testsuites>')" {report}`;
+const FAKE_RUN = path.join(__dirname, 'helpers', 'fake-run.cjs');
 const PARAMS = { '&common': { p1: { b: { selector: '#old1' } }, p2: { b: { selector: '#old2' } } } };
 
 let dir: string;
 let wsRoot: string;
 const paramsFile = () => path.join(dir, 'test/ui/model-parameters.json');
+const brokenFile = () => `${dir}-broken.json`;
 const cfg = (over: Partial<Config> = {}): Config => ({
   ...DEFAULTS,
   projectDir: dir,
   write: true,
   local: false,
-  runCommand: PASSING,
+  runCommand: `node ${FAKE_RUN} {report} {spec} ${brokenFile()}`,
   buildCommand: 'true',
   ...over,
 });
@@ -73,11 +81,23 @@ beforeEach(() => {
   fs.writeFileSync(paramsFile(), JSON.stringify(PARAMS, null, 4) + '\n');
   for (const k of Object.keys(fakePatches)) delete fakePatches[k];
   claimsOnly.clear();
+  Object.assign(agentLog, { calls: [], active: 0, peak: 0, runsAfterFirst: [] });
 });
 
-const run = async (over: Partial<Config> = {}, concurrency = 2) => {
+/** Every module with a fake patch starts broken: its spec fails until the value changes. */
+function writeBroken() {
+  const broken: Record<string, [string[], unknown]> = {};
+  for (const [spec, p] of Object.entries(fakePatches)) {
+    const original = p.path.reduce<unknown>((v, k) => (v as Record<string, unknown>)?.[k], PARAMS);
+    broken[/-(m\d+)-/.exec(spec)![1]] = [p.path, original];
+  }
+  fs.writeFileSync(brokenFile(), JSON.stringify(broken));
+}
+
+const run = async (over: Partial<Config> = {}, concurrency = 2, isolate = true) => {
+  writeBroken();
   const bus = new Bus();
-  const { agents: summaries } = await orchestrate({ config: cfg(over), specs: [], concurrency, isolate: true, workspaceRoot: wsRoot, bus });
+  const { agents: summaries } = await orchestrate({ config: cfg(over), specs: [], concurrency, isolate, workspaceRoot: wsRoot, bus });
   return { bus, summaries, state: bus.history.reduce(reduce, initialState) };
 };
 
@@ -134,8 +154,43 @@ describe('orchestrate', () => {
     ).rejects.toThrow(/relative/);
   });
 
-  it('refuses parallel writes in a shared checkout', async () => {
-    await expect(orchestrate({ config: cfg(), specs: [], concurrency: 2, isolate: false, bus: new Bus() })).rejects.toThrow(/isolated/);
+});
+
+describe('orchestrate in the real course folder', () => {
+  const real = (over: Partial<Config> = {}) => run(over, 2, false);
+
+  it('tests every spec, then fixes the failing modules one agent at a time', async () => {
+    fakePatches['c-m1-s3.js'] = { path: ['&common', 'p1', 'b', 'selector'], value: '#new1' };
+    fakePatches['c-m2-s3.js'] = { path: ['&common', 'p2', 'b', 'selector'], value: '#new2' };
+    const { summaries, state } = await real();
+    expect(summaries.map((s) => s.status)).toEqual(['fixed', 'fixed']);
+    expect(agentLog.peak).toBe(1); // writes and rebuilds never overlap
+    const doc = JSON.parse(fs.readFileSync(paramsFile(), 'utf8'));
+    expect([doc['&common'].p1.b.selector, doc['&common'].p2.b.selector]).toEqual(['#new1', '#new2']);
+    expect(fs.readdirSync(wsRoot)).toEqual([]); // no copies made
+    expect(state.agents.m1.steps).toMatchObject({ run: 'done', fix: 'done', rebuild: 'done', verify: 'done', report: 'done' });
+    expect(state.merge).toEqual([]);
+  });
+
+  it('starts each agent from the test-phase result instead of re-running the spec', async () => {
+    fakePatches['c-m1-s3.js'] = { path: ['&common', 'p1', 'b', 'selector'], value: '#new1' };
+    await real();
+    expect(agentLog.runsAfterFirst).toEqual([0]);
+  });
+
+  it('gives a passing module no agent', async () => {
+    fakePatches['c-m1-s3.js'] = { path: ['&common', 'p1', 'b', 'selector'], value: '#new1' };
+    const { summaries } = await real();
+    expect(agentLog.calls).toEqual(['c-m1-s3.js']);
+    expect(summaries.map((s) => [s.module, s.status, s.costUsd])).toEqual([['m1', 'fixed', 0.01], ['m2', 'passed', 0]]);
+  });
+
+  it('reverts a change the agent did not verify', async () => {
+    fakePatches['c-m1-s3.js'] = { path: ['&common', 'p1', 'b', 'selector'], value: '#new1' };
+    claimsOnly.add('c-m1-s3.js');
+    const { summaries } = await real();
+    expect(summaries[0].status).toBe('proposed');
+    expect(JSON.parse(fs.readFileSync(paramsFile(), 'utf8'))['&common'].p1.b.selector).toBe('#old1');
   });
 });
 
@@ -161,6 +216,7 @@ describe('workspace', () => {
     fs.mkdirSync(path.join(dir, 'node_modules/pkg'), { recursive: true });
     fs.mkdirSync(path.join(dir, 'test/ui/cypress/screenshots'), { recursive: true });
     const ws = createWorkspace(dir, wsRoot, 'm1');
+    expect(ws).toBe(fs.realpathSync(ws)); // macOS: /private/var, not /var, or Cypress finds no spec
     expect(fs.existsSync(path.join(ws, '.git'))).toBe(false);
     expect(fs.existsSync(path.join(ws, 'test/ui/cypress/screenshots'))).toBe(false);
     expect(fs.lstatSync(path.join(ws, 'node_modules')).isSymbolicLink()).toBe(true);

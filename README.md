@@ -177,8 +177,9 @@ npm run fix-course -- --project /Users/jay/everfi/git/courses/digital-banking --
 | Install deps | `yarn install --frozen-lockfile --prefer-offline` (as CI on a fresh checkout). Needed because ECC resolves the course's components through it; a `.pnp.js` left over from another checkout location makes `ecc build` fail with "Could not find ContentPartnerAPI or components". `--skip-install` / `--install-cmd` to change. |
 | Build course | `ecc build --split` (as CI). `--skip-course-build` reuses `public/`. |
 | Generate tests | `ecc --script test:build` (S3 specs, as CI). |
-| Test & fix | One agent per module, `--concurrency` in parallel, each in an isolated copy; only verified fixes merged; checkout rebuilt once. |
-| Final verify | Re-runs each fixed module in the checkout (no model spend). A fix that fails there is reverted. |
+| Run tests | Every module's spec runs in the course folder (`test/ui/cypress/e2e`), `--concurrency` at a time, and results are collected. Plain Cypress: no agent, no spend. |
+| Fix (one by one) | Each failing module gets a Claude agent, **one at a time**, in the course folder: diagnose, change one model value, rebuild, re-run. It starts from the collected result (no second run). A change that is not verified is reverted before the next agent starts, so writes never collide. |
+| Final verify | Re-runs all fixed modules together (no model spend). A fix that fails now is reverted. |
 | Report | `runs/<runId>/report.md` and `report.json`: per module result, changes (old -> new), cost, what needs a human. |
 | Commit | Only `test/ui/model-parameters.json`, `model-map.json`, `model-edges.json`. Refuses if any other tracked file changed. |
 | Push | Shows branch, files and message, asks `Push to origin? [y/N]` (`--push` skips the question; no terminal = no push). CI (`build and test`, runs on `test/**`) then verifies the branch. |
@@ -187,7 +188,7 @@ You raise the PR (the link is printed) and merge; the tool never does. Exit code
 
 ## 6b. Orchestrator and live UI
 
-The orchestrator runs **one fixer agent per module** (one per generated spec), **several in parallel**. Each agent works through the same steps in order: run → diagnose → fix → rebuild → verify → report. Everything is streamed as events to the terminal and to a web UI (orchestration canvas + execution matrix). The default model is Claude Sonnet 4.5 (`claude-sonnet-4-5`) via the Claude Agent SDK.
+The orchestrator works in the **real course folder**: it runs every module's spec (**several in parallel**) and collects the results, then fixes the failing modules with **one agent at a time**, each going through the same steps in order: diagnose → fix → rebuild → verify → report. Everything is streamed as events to the terminal and to a web UI, the **Modello Fixer control room** (pipeline stages, agents, execution matrix). The default model is Claude Sonnet 4.5 (`claude-sonnet-4-5`) via the Claude Agent SDK.
 
 ```bash
 npm run ui:build                                   # once, builds ui/dist
@@ -199,13 +200,13 @@ npm run orchestrate -- --replay runs/<runId>.jsonl # replay a saved run
 npm run ui:dev                                     # Vite dev server on 5173 (proxies /api to 4317)
 ```
 
-- **Isolation.** Each agent gets its own copy-on-write copy of the course in a temp folder (no `.git`, no Cypress screenshots/videos, `node_modules` symlinked). This is required because ECC deletes and regenerates `cypress/e2e` on every rebuild, and every agent edits the same model files.
-- **Merge.** With `--write`, only agents that ended `fixed` (verified by a passing rerun) have their leaf patches replayed onto the real checkout, through the same guard. A patch is a `conflict` and is not written when another agent set the same key to a different value or the checkout no longer holds the value the agent started from. The checkout is rebuilt once afterwards. Dry-run never touches the checkout.
+- **Why one fixer at a time.** ECC deletes and regenerates `cypress/e2e` on every rebuild, and every agent edits the same model files. Running tests in parallel is safe (read-only); writing and rebuilding is done by one agent at a time, so nothing collides and no locking is needed.
+- **`--isolate` (optional).** The earlier mode: every agent in parallel, each in a copy-on-write copy of the course in a temp folder (no `.git`, no Cypress media, `node_modules` symlinked; paths resolved to `/private/var/...` on macOS so Cypress finds the spec). With `--write`, only `fixed` agents' patches are replayed onto the checkout through the guard; a key another agent set differently is a `conflict` and not written.
 - **Logs.** Every run is saved to `runs/<runId>.jsonl` (gitignored) and can be replayed in the terminal or the UI.
-- **Verified only.** An agent that reports `fixed` without a successful rebuild and a passing rerun after its last change is downgraded to `proposed` and not merged. Each agent's changes merge all-or-nothing; when an agent set the same key twice, its last value is the one merged.
+- **Verified only.** An agent that reports `fixed` without a successful rebuild and a passing rerun after its last change is downgraded to `proposed`, and its change is reverted (or, with `--isolate`, not merged).
 - **Local only.** The UI server listens on `127.0.0.1` and refuses requests from other hosts or cross-site pages, because `POST /api/runs?mode=live` spends money and, with `--write`, edits the checkout.
-- **Workspace caveats.** `--model-dir` must be relative, and model files that link out of the workspace are refused. `node_modules` is symlinked, not copied, so anything a build writes there is shared with the real checkout. `.git` is not copied, so a build step that reads git metadata behaves differently in a workspace.
-- Extra options: `--concurrency` (default 2), `--shared-workspace` (no copies; only allowed for parallel runs without `--write`, or with `--concurrency 1`), `--keep-workspaces`, `--speed`, `--port`. `--max-budget-usd` is **per agent**.
+- **`--isolate` caveats.** `--model-dir` must be relative, and model files that link out of the workspace are refused. `node_modules` is symlinked, not copied, so anything a build writes there is shared with the real checkout. `.git` is not copied, so a build step that reads git metadata behaves differently in a workspace.
+- Extra options: `--concurrency` (default 2), `--isolate`, `--keep-workspaces` (with `--isolate`), `--speed`, `--port`. `--max-budget-usd` is **per agent**.
 
 ## 7. Known limitations
 

@@ -16,15 +16,16 @@ const LOG_DIR = path.join(REPO, 'runs');
 
 const HELP = `modello-orchestrate [--project <course-root>] [options]
 
-Runs one fixer agent per module spec, several in parallel, each through
-run -> diagnose -> fix -> rebuild -> verify -> report, and streams events.
+In the real course folder: runs every module spec (--concurrency at a time) and collects results,
+then fixes the failing modules with one agent at a time (diagnose -> fix -> rebuild -> verify -> report),
+so writes never overlap. Streams events to the terminal and the UI.
 
   --project <dir>        Course root (required for live runs)
   --spec <file>          Spec to include (repeatable). Default: all specs
   --concurrency <n>      Agents in parallel (default 2)
-  --write                Apply changes (agents fix in isolated copies; verified fixes are merged back)
-  --shared-workspace     Run agents in the checkout itself (only with --concurrency 1 when writing)
-  --keep-workspaces      Do not delete the isolated copies afterwards
+  --write                Apply changes in the course (unverified changes are reverted)
+  --isolate              Instead: one agent per module in parallel, each in a private copy; verified fixes merged back
+  --keep-workspaces      With --isolate: do not delete the copies afterwards
   --demo                 Scripted run: no Cypress, no model spend
   --replay <file>        Replay a saved runs/*.jsonl log
   --speed <n>            Demo/replay speed (default 1)
@@ -41,7 +42,7 @@ const { values } = parseArgs({
     spec: { type: 'string', multiple: true },
     concurrency: { type: 'string' },
     write: { type: 'boolean', default: false },
-    'shared-workspace': { type: 'boolean', default: false },
+    isolate: { type: 'boolean', default: false },
     'keep-workspaces': { type: 'boolean', default: false },
     demo: { type: 'boolean', default: false },
     replay: { type: 'string' },
@@ -83,7 +84,7 @@ const config: Config | undefined = values.project
 const problems = config ? preflight(config) : ['no --project given'];
 
 const live = (bus: Bus) =>
-  orchestrate({ config: config!, specs: values.spec ?? [], concurrency, isolate: !values['shared-workspace'], keepWorkspaces: values['keep-workspaces'], bus });
+  orchestrate({ config: config!, specs: values.spec ?? [], concurrency, isolate: values.isolate ?? false, keepWorkspaces: values['keep-workspaces'], bus });
 
 if (values.serve) {
   const port = num(values.port, 4317);

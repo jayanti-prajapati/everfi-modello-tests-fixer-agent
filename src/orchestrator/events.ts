@@ -10,7 +10,7 @@ export type StepStatus = 'waiting' | 'running' | 'done' | 'skipped' | 'failed';
 export type AgentStatus = 'queued' | 'running' | 'passed' | 'fixed' | 'proposed' | 'unfixable' | 'error' | 'skipped';
 
 /** Stages of the local fix pipeline (fix-course), in order. */
-export const PIPELINE_STAGES = ['preflight', 'branch', 'install', 'build', 'generate', 'fix', 'verify', 'report', 'commit', 'push'] as const;
+export const PIPELINE_STAGES = ['preflight', 'branch', 'install', 'build', 'generate', 'test', 'fix', 'verify', 'report', 'commit', 'push'] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 
 /** One row of the execution matrix: a Cypress test case of a module's spec. */
