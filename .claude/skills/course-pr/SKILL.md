@@ -5,7 +5,7 @@ description: Create a branch in an EverFi course repo, commit the model/test con
 
 # Course branch, commit and PR
 
-Course repos live in `/Users/jay/everfi/git/courses/<course>` and merge PRs into `develop` (origin `EVERFI-Content/<course>`). This skill is the only sanctioned way to commit in a course repo. Run every git command with `git -C <course-root>`.
+Course repos live in `/Users/jay/everfi/git/courses/<course>` and merge PRs into `develop` (origin `EVERFI-Content/<course>`). This skill (or the `fix-course` pipeline, which commits model files on a `test/modello-fixes-*` branch and pushes only after y/N) is the only sanctioned way to commit in a course repo. If `fix-course` already pushed a branch, use this skill only to write and open the PR from it (steps 4-6), after the user confirms. Run every git command with `git -C <course-root>`.
 
 ## 1. Look before touching anything
 - `git -C <root> status -sb` and `git diff` (also `git diff --stat`). Note the current branch and whether it is behind `origin/develop`.

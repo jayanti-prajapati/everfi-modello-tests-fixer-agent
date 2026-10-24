@@ -45,6 +45,7 @@ You point it at an EverFi course checkout whose generated Cypress tests fail. It
 - `.claude/skills/ecc-course-dev`: set up and build courses with ECC/Furnace.
 - `.claude/skills/course-pr`: branch, commit, push and open a PR in a course repo, after you confirm the text.
 - `.claude/skills/code-review`, `wrap-up`; subagents `reviewer`, `researcher`.
+- Which skill applies at which step is tabulated in the README ("Skills used at every step").
 
 ## How to use it
 

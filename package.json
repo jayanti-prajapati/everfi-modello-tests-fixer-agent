@@ -5,13 +5,20 @@
   "type": "module",
   "description": "Agent that repairs Modello model configuration when generated Cypress tests fail",
   "bin": {
-    "modello-fixer": "dist/cli.js"
+    "modello-fixer": "dist/cli.js",
+    "modello-orchestrate": "dist/orchestrate.js",
+    "modello-fix-course": "dist/fix-course.js"
   },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p ui",
     "test": "vitest run",
-    "dev": "tsx src/cli.ts"
+    "dev": "tsx src/cli.ts",
+    "orchestrate": "tsx src/orchestrate.ts",
+    "ui:dev": "vite ui",
+    "ui:build": "vite build ui",
+    "fix-course": "tsx src/fix-course.ts",
+    "eval": "tsx test/eval/run.ts"
   },
   "engines": {
     "node": ">=20"
@@ -23,8 +30,14 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
+    "vite": "^8.3.5",
     "vitest": "^5.0.3"
   }
 }

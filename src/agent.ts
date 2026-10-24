@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { query, type CanUseTool } from '@anthropic-ai/claude-agent-sdk';
+import { query, type CanUseTool, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { type Config } from './config.js';
 import { Session } from './session.js';
 import { SYSTEM_PROMPT } from './prompt.js';
@@ -22,6 +22,11 @@ export function makeCanUseTool(projectDir: string, onDeny: (msg: string) => void
       const abs = path.resolve(root, target);
       const inside = abs === root || abs.startsWith(root + path.sep);
       if (!inside) return deny(toolName, input, 'Reads are limited to the project directory.');
+      // Huge, irrelevant trees: listing them costs tokens on every later turn.
+      const rel = path.relative(root, abs);
+      if (/(^|\/)(node_modules|\.pnp|\.yarn)(\/|$)/.test(rel) || String(input.pattern ?? '').includes('node_modules')) {
+        return deny(toolName, input, 'node_modules/.yarn are off limits; use find_in_spec, get_model_entries or a narrower path.');
+      }
       if (path.basename(abs).startsWith('.env')) return deny(toolName, input, '.env files are off limits.');
       return { behavior: 'allow', updatedInput: input };
     }
@@ -35,12 +40,29 @@ export interface RunResult {
   finalText?: string;
 }
 
-export async function runFixer(config: Config, specs: string[], log: (s: string) => void = console.log): Promise<RunResult> {
-  const session = new Session(config);
+export interface FixerHooks {
+  /** Use this session (e.g. one with a listener attached) instead of a fresh one. */
+  session?: Session;
+  /** Every raw SDK message, for the orchestrator's event stream. */
+  onMessage?: (msg: SDKMessage) => void;
+  /** What the orchestrator already found (failure, selector, spec block, model entries, ruled-out fixes) */
+  caseFile?: string;
+}
+
+export async function runFixer(
+  config: Config,
+  specs: string[],
+  log: (s: string) => void = console.log,
+  hooks: FixerHooks = {},
+): Promise<RunResult> {
+  const session = hooks.session ?? new Session(config);
   const prompt =
     `Project: ${config.projectDir}\nModel directory: ${config.modelDir}\nMode: ${config.write ? 'WRITE (changes will be applied)' : 'DRY-RUN (record proposals only)'}\n` +
     `Max Cypress runs: ${config.maxAttempts}\n` +
-    (specs.length ? `Fix these specs: ${specs.join(', ')}` : 'Run every spec from list_specs and fix any that fail.');
+    (specs.length ? `Fix these specs: ${specs.join(', ')}` : 'Run every spec from list_specs and fix any that fail.') +
+    (hooks.caseFile
+      ? `\n\nCase file (collected by the orchestrator; the spec has already been run, do not call list_specs or run_cypress before making a change):\n${hooks.caseFile}`
+      : '');
 
   const result: RunResult = { session };
   for await (const msg of query({
@@ -58,8 +80,10 @@ export async function runFixer(config: Config, specs: string[], log: (s: string)
       canUseTool: makeCanUseTool(config.projectDir, log),
       settingSources: [],
       maxBudgetUsd: config.maxBudgetUsd,
+      maxTurns: config.maxTurns,
     },
   })) {
+    hooks.onMessage?.(msg);
     if (msg.type === 'assistant') {
       for (const block of msg.message.content) {
         if (block.type === 'text' && block.text.trim()) log(block.text.trim());

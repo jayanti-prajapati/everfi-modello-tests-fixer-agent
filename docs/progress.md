@@ -6,6 +6,8 @@ Core agent implemented and unit-tested (35 tests, typecheck clean): guard, failu
 Smoke test done (2026-10-11) on a scratch copy of digital-banking `app/` + `test/ui` with one broken selector (`#btn2` -> `#btn2-stale`, m1/a1/page-2) and stubbed run/build commands: dry-run proposed the right one-leaf change and wrote nothing; `--write` fixed it, rebuilt, reran green, and left the model file identical to the original with nothing else touched. ~$0.10-0.13 per run. Build now defaults to ECC (`ecc --script test:build`); smoke test re-passed with a stubbed build after that change. Real `ecc`/`modello run` (AWS, browser, compiled course content) not exercised yet; preflight passes against the real digital-banking checkout. One extra dry-run once proposed the same fix with weaker evidence (inferred from a sibling page), so the prompt's "only when clearly unique" rule is not airtight.
 
 ## Next steps
+- [ ] First real `npm run fix-course -- --project /Users/jay/everfi/git/courses/digital-banking --serve` (not run yet; user asked not to test). Check: `ecc build --split` and `test:build` in the checkout, workspace copies build without `.git`, final verify, commit contents, y/N push, CI on the `test/**` branch.
+- [ ] Remove the leftover workspace `$TMPDIR/modello-orchestrator/m3-dEsUjB` (from a stopped run; `rm -rf` is denied in this repo's settings).
 - [ ] Open the PR for branch `modello-m1-config-fixes` (pushed, commit `4e7085fd`): `gh` is still blocked by SAML on `EVERFI-Content`, so use the browser link or authorize the token. Body is ready (see 2026-10-12 entry).
 - [ ] Rerun m1 to check the green run holds; run m2 (the `m2/a4/page-4` selector change is untested), then m3 and m4.
 - [ ] Solve "which page/block failed" for real runs: the JUnit stack has no generated-spec frame. The failure screenshot's command log plus a search of the generated spec for the failing selector works manually; automate it or add a DOM dump on failure.
@@ -52,3 +54,16 @@ Smoke test done (2026-10-11) on a scratch copy of digital-banking `app/` + `test
 - Is the first choice correct in every s3 assessment question? m1 passed once with `prod-assesment-5.js`, not confirmed from source.
 - Is translation-edit mode on in the deployed `develop` build (wrapped `name` attributes)? Possibly a deploy issue for the course team.
 - Is m1 stable across reruns, and do m2-m4 pass with these changes?
+
+## 2026-10-24 session
+**Done**
+- Multi-agent orchestrator over `runFixer` (`src/orchestrator/`): one agent per module spec, parallel (`--concurrency`), steps run -> diagnose -> fix -> rebuild -> verify -> report, each agent in a copy-on-write workspace; only verified fixes merged (all-or-nothing per agent, conflicts detected); events to terminal, JSONL (`runs/`) and SSE.
+- Live UI (`ui/`, Vite + React, dark theme modelled on the QA Guardian screenshot): orchestration canvas, agent cards with progress rings, execution matrix, pipeline stage bar. `npm run orchestrate -- --serve --demo` for an offline demo. Server is local-only (127.0.0.1, Host/Origin checks).
+- Milestone 1 pipeline `npm run fix-course` (`src/pipeline/`): preflight -> branch `test/modello-fixes-<time>` from origin/develop -> `ecc build --split` -> `ecc --script test:build` -> parallel fix -> final verify in checkout (revert on failure) -> report -> commit only `test/ui/model-*.json` -> push after y/N. PR/merge stay human. CLAUDE.md, `course-pr` and `modello-tests` skills updated for this.
+- Found: VS Code sets `ELECTRON_RUN_AS_NODE=1`; inherited by Cypress it made every run fail with MODULE_NOT_FOUND (also in the real checkout). `runShell` now drops it (`childEnv`).
+- Reviewer findings fixed (merge of unverified values, partial merges, absolute `--model-dir` bypassing isolation, unauthenticated server, crash on bad URL, agent-claimed success, workspace leak, stuck UI, step regressions). 66 tests, typecheck clean. Default model for orchestrator/pipeline: `claude-sonnet-4-5`. New dev deps: react, react-dom, vite, @vitejs/plugin-react, @types/react, @types/react-dom.
+
+**Open questions**
+- Does `ecc --script test:build` need `.git` (workspaces exclude it)? Does any build step write into `node_modules` (symlinked into workspaces)?
+- Real per-module cost/time with Sonnet 4.5 in parallel (one interrupted dry-run cost $0.48 for 2 modules, but Cypress never started because of the Electron env bug).
+

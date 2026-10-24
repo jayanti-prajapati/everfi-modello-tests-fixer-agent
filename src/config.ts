@@ -11,6 +11,8 @@ export interface Config {
   maxAttempts: number;
   model: string;
   maxBudgetUsd: number;
+  /** Cap on agent turns (model round trips); the budget cap still applies */
+  maxTurns?: number;
   /** Operator-supplied shell templates. Placeholders: {spec} (absolute path) {report} (run only) */
   runCommand: string;
   buildCommand: string;
@@ -21,6 +23,7 @@ export const DEFAULTS = {
   maxAttempts: 3,
   model: 'claude-sonnet-5-5',
   maxBudgetUsd: 5,
+  maxTurns: 20,
   runCommand:
     'modello run -- cypress run --spec {spec} --reporter junit --reporter-options mochaFile={report},toConsole=false',
   /** ECC regenerates every test defined in .github/workflows/build-and-test.yml (deletes test/ui/cypress/e2e first) */
